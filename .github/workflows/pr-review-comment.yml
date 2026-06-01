@@ -1,0 +1,32 @@
+name: PR Pilot — auto review comment
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install pullwise -q
+
+      - name: Post AI review comment
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          pr-pilot comment \
+            --repo ${{ github.repository }} \
+            --pr ${{ github.event.pull_request.number }} \
+            --base ${{ github.event.pull_request.base.ref }}

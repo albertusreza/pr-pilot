@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 
 from openai import OpenAI
 
-from .templates import DESCRIBE_SYSTEM, DESCRIBE_USER, LABEL_SYSTEM, REVIEW_SYSTEM
+from .templates import (
+    DESCRIBE_SYSTEM, DESCRIBE_USER, LABEL_SYSTEM, REVIEW_SYSTEM,
+    CHANGELOG_SYSTEM, CHANGELOG_USER, REVIEW_COMMENT_HEADER, REVIEW_COMMENT_TEMPLATE,
+)
 
 _MAX_DIFF_CHARS = 24_000   # stay well within context limits
 _MODEL = "gpt-4o"
@@ -121,3 +124,109 @@ def review_pr(api_key: str, base: str = "main", model: str = _MODEL) -> str:
         ],
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+def review_pr_as_comment(api_key: str, base: str = "main", model: str = _MODEL) -> str:
+    """Return a GitHub-flavoured markdown comment with the AI review."""
+    body = review_pr(api_key, base=base, model=model)
+    return REVIEW_COMMENT_TEMPLATE.format(header=REVIEW_COMMENT_HEADER, body=body)
+
+
+# ── Changelog ────────────────────────────────────────────────────────────────
+
+@dataclass
+class ChangelogEntry:
+    version_bump: str        # "patch" | "minor" | "major"
+    highlights: str
+    added: list[str]
+    changed: list[str]
+    fixed: list[str]
+    removed: list[str]
+    security: list[str]
+
+    def to_markdown(self, new_version: str, date: str) -> str:
+        lines = [f"## [{new_version}] - {date}", f"\n_{self.highlights}_\n"]
+        sections = [
+            ("Added", self.added),
+            ("Changed", self.changed),
+            ("Fixed", self.fixed),
+            ("Removed", self.removed),
+            ("Security", self.security),
+        ]
+        for title, items in sections:
+            if items:
+                lines.append(f"\n### {title}")
+                for item in items:
+                    lines.append(f"- {item}")
+        return "\n".join(lines)
+
+
+def _get_current_version() -> str:
+    """Read version from pyproject.toml, setup.cfg, or package __init__."""
+    try:
+        tag = _git("describe", "--tags", "--abbrev=0")
+        return tag.lstrip("v") if tag else "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+def _get_commits_since_tag() -> str:
+    tag = _git("describe", "--tags", "--abbrev=0")
+    if tag:
+        return _git("log", f"{tag}...HEAD", "--oneline", "--no-merges")
+    return _git("log", "--oneline", "--no-merges", "-30")
+
+
+def _bump_version(current: str, bump: str) -> str:
+    parts = current.split(".")
+    try:
+        major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2].split("-")[0])
+    except (IndexError, ValueError):
+        return "0.1.0"
+    if bump == "major":
+        return f"{major + 1}.0.0"
+    if bump == "minor":
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def generate_changelog(api_key: str, model: str = _MODEL) -> tuple[ChangelogEntry, str]:
+    """Return (ChangelogEntry, new_version_string)."""
+    import datetime
+    client = OpenAI(api_key=api_key)
+    current = _get_current_version()
+    commits = _get_commits_since_tag()
+    diff = get_diff(base="HEAD~10") if not commits else get_diff(base=f"v{current}" if current != "0.0.0" else "HEAD~10")
+
+    if not commits:
+        raise ValueError("No commits found since last tag. Nothing to changelog.")
+
+    user_msg = CHANGELOG_USER.format(
+        current_version=current, commits=commits, diff=diff[:12_000] or "(empty)"
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=1024,
+        messages=[
+            {"role": "system", "content": CHANGELOG_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+
+    data = json.loads(raw.strip())
+    entry = ChangelogEntry(
+        version_bump=data.get("version", "patch"),
+        highlights=data.get("highlights", ""),
+        added=data.get("added", []),
+        changed=data.get("changed", []),
+        fixed=data.get("fixed", []),
+        removed=data.get("removed", []),
+        security=data.get("security", []),
+    )
+    new_version = _bump_version(current, entry.version_bump)
+    return entry, new_version

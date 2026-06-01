@@ -3,7 +3,7 @@ import argparse
 import os
 import sys
 
-from .analyzer import describe_pr, suggest_labels, review_pr
+from .analyzer import describe_pr, suggest_labels, review_pr, review_pr_as_comment, generate_changelog
 
 _RESET = "\033[0m"
 _BOLD  = "\033[1m"
@@ -49,6 +49,54 @@ def cmd_review(args: argparse.Namespace) -> None:
     print(f"\n  {_DIM}Reviewing diff against '{args.base}'...{_RESET}\n")
     review = review_pr(_key(), base=args.base, model=args.model)
     print(review)
+    print()
+
+
+def cmd_comment(args: argparse.Namespace) -> None:
+    """Post AI review as a PR comment on GitHub."""
+    from .github_client import upsert_comment
+    from .templates import REVIEW_COMMENT_HEADER
+
+    repo   = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+    pr_num = args.pr or int(os.environ.get("PR_NUMBER", "0"))
+
+    if not repo or not pr_num:
+        print("pr-pilot comment: --repo and --pr are required (or set GITHUB_REPOSITORY / PR_NUMBER)", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n  {_DIM}Generating review for PR #{pr_num}...{_RESET}\n")
+    comment_body = review_pr_as_comment(_key(), base=args.base, model=args.model)
+    url = upsert_comment(repo, pr_num, comment_body, REVIEW_COMMENT_HEADER)
+    print(f"  {_GREEN}✓{_RESET} Review posted: {url}\n")
+
+
+def cmd_changelog(args: argparse.Namespace) -> None:
+    import datetime
+    print(f"\n  {_DIM}Generating changelog from commits...{_RESET}\n")
+    entry, new_version = generate_changelog(_key(), model=args.model)
+    today = datetime.date.today().isoformat()
+    md = entry.to_markdown(new_version, today)
+
+    print(f"{_BOLD}Suggested version bump:{_RESET} {entry.version_bump}  →  {_GREEN}{new_version}{_RESET}")
+    print(f"{_BOLD}Highlights:{_RESET} {entry.highlights}\n")
+    print(md)
+
+    if args.output:
+        changelog_path = args.output
+        import pathlib
+        p = pathlib.Path(changelog_path)
+        if p.exists():
+            existing = p.read_text()
+            # Insert after the first line (# Changelog header) if present
+            if existing.startswith("# "):
+                header, rest = existing.split("\n", 1)
+                new_content = f"{header}\n\n{md}\n{rest}"
+            else:
+                new_content = f"{md}\n\n{existing}"
+        else:
+            new_content = f"# Changelog\n\n{md}\n"
+        p.write_text(new_content)
+        print(f"\n  {_GREEN}✓{_RESET} Prepended to {changelog_path}")
     print()
 
 
@@ -106,6 +154,21 @@ def main() -> None:
     p_rev.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
     p_rev.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
     p_rev.set_defaults(func=cmd_review)
+
+    # --- comment ---
+    p_com = sub.add_parser("comment", help="Post an AI review as a GitHub PR comment")
+    p_com.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
+    p_com.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
+    p_com.add_argument("--repo", default=None, help="GitHub repo slug (e.g. owner/repo)")
+    p_com.add_argument("--pr", type=int, default=None, help="PR number")
+    p_com.set_defaults(func=cmd_comment)
+
+    # --- changelog ---
+    p_cl = sub.add_parser("changelog", help="Generate a CHANGELOG.md entry from commits since last tag")
+    p_cl.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
+    p_cl.add_argument("--output", default=None, metavar="FILE",
+                      help="Prepend entry to FILE (e.g. CHANGELOG.md). Prints to stdout if omitted.")
+    p_cl.set_defaults(func=cmd_changelog)
 
     # --- action (internal, called by entrypoint.sh) ---
     p_act = sub.add_parser("action", help="Run as a GitHub Action (internal)")

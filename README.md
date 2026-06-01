@@ -87,6 +87,50 @@ pr-pilot review
 pr-pilot describe --markdown pr_description.md
 ```
 
+## Features
+
+| Command | What it does |
+|---|---|
+| `pr-pilot describe` | Generate a structured PR description from your diff |
+| `pr-pilot review` | Get a senior-engineer-style code review in the terminal |
+| `pr-pilot comment` | Post an AI review as a GitHub PR comment (updates on re-run, no spam) |
+| `pr-pilot changelog` | Generate a `CHANGELOG.md` entry from commits since last tag |
+
+## Usage
+
+```bash
+# Generate PR description (terminal)
+pr-pilot describe --base main
+
+# Get a quick code review in the terminal
+pr-pilot review --base main
+
+# Post review as a GitHub PR comment
+pr-pilot comment --repo owner/repo --pr 42
+
+# Generate CHANGELOG entry (print to stdout)
+pr-pilot changelog
+
+# Write directly into CHANGELOG.md
+pr-pilot changelog --output CHANGELOG.md
+```
+
+### Auto-comment on every PR (GitHub Action)
+
+```yaml
+# .github/workflows/pr-review.yml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0
+- run: pip install pullwise
+- run: pr-pilot comment --repo ${{ github.repository }} --pr ${{ github.event.pull_request.number }}
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    GITHUB_TOKEN: ${{ github.token }}
+```
+
+The comment updates itself on every new push — no duplicate comments.
+
 ## Options
 
 | Input | Default | Description |

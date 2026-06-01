@@ -78,3 +78,14 @@ def add_labels(repo: str, pr_number: int, labels: list[str]) -> None:
 
 def post_comment(repo: str, pr_number: int, body: str) -> None:
     _api("POST", f"/repos/{repo}/issues/{pr_number}/comments", {"body": body})
+
+
+def upsert_comment(repo: str, pr_number: int, body: str, marker: str) -> str:
+    """Post or update a comment that contains `marker`. Returns the comment URL."""
+    comments = _api("GET", f"/repos/{repo}/issues/{pr_number}/comments?per_page=100")
+    for comment in comments:
+        if marker in (comment.get("body") or ""):
+            data = _api("PATCH", f"/repos/{repo}/issues/comments/{comment['id']}", {"body": body})
+            return data.get("html_url", "")
+    data = _api("POST", f"/repos/{repo}/issues/{pr_number}/comments", {"body": body})
+    return data.get("html_url", "")
