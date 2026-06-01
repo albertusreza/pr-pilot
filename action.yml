@@ -1,0 +1,35 @@
+name: PR Pilot
+description: "AI-powered PR descriptions, labels, and code review using OpenAI"
+author: "Albertus Reza"
+
+branding:
+  icon: "edit-3"
+  color: "blue"
+
+inputs:
+  openai-api-key:
+    description: "OpenAI API key (store in GitHub Secrets as OPENAI_API_KEY)"
+    required: true
+  model:
+    description: "OpenAI model to use (default: gpt-4o)"
+    required: false
+    default: "gpt-4o"
+  skip-labels:
+    description: "Skip adding labels to the PR"
+    required: false
+    default: "false"
+  update-title:
+    description: "Also update the PR title (default: false)"
+    required: false
+    default: "false"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+    PR_NUMBER: ${{ github.event.pull_request.number }}
+    GITHUB_TOKEN: ${{ github.token }}
+    SKIP_LABELS: ${{ inputs.skip-labels }}
+    UPDATE_TITLE: ${{ inputs.update-title }}
+    MODEL: ${{ inputs.model }}

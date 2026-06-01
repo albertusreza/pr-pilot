@@ -1,0 +1,20 @@
+name: PR Pilot — auto describe
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  describe:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: albertusreza/pr-pilot@main
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
