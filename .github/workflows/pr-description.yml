@@ -1,4 +1,4 @@
-name: PR Pilot — auto describe
+name: PullWise — auto describe
 
 on:
   pull_request:

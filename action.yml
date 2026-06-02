@@ -1,5 +1,5 @@
-name: PR Pilot
-description: "AI-powered PR descriptions, labels, and code review using OpenAI"
+name: PullWise
+description: "AI-powered PR descriptions, labels, code review, and changelogs using OpenAI"
 author: "Albertus Reza"
 
 branding:

@@ -1,4 +1,4 @@
-# pr-pilot ✈️
+# PullWise ✈️
 
 [![PyPI](https://img.shields.io/pypi/v/pullwise)](https://pypi.org/project/pullwise/)
 [![Downloads](https://img.shields.io/pypi/dm/pullwise)](https://pypi.org/project/pullwise/)
@@ -6,6 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Stop writing PR descriptions.** Let AI do it.
+
+> 📦 GitHub Action: [`albertusreza/pr-pilot`](https://github.com/marketplace/actions/pullwise) · PyPI: [`pullwise`](https://pypi.org/project/pullwise/)
 
 `pr-pilot` is a GitHub Action + CLI that analyzes your diff and commit history, then automatically writes a clear, structured PR description — with a summary, change list, test plan, and labels.
 

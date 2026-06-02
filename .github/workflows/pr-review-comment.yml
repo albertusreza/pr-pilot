@@ -1,4 +1,4 @@
-name: PR Pilot — auto review comment
+name: PullWise — auto review comment
 
 on:
   pull_request:
