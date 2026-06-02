@@ -110,6 +110,9 @@ def cmd_action(args: argparse.Namespace) -> None:
     token    = os.environ.get("GITHUB_TOKEN", "")
     skip_labels = os.environ.get("SKIP_LABELS", "false").lower() == "true"
     update_title = os.environ.get("UPDATE_TITLE", "false").lower() == "true"
+    # Allow action.yml to override the model via env var
+    if os.environ.get("MODEL"):
+        args.model = os.environ["MODEL"]
 
     if not repo or not pr_num or not token:
         print("pr-pilot action: GITHUB_REPOSITORY, PR_NUMBER, GITHUB_TOKEN must be set", file=sys.stderr)
