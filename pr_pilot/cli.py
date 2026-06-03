@@ -6,6 +6,7 @@ import sys
 from .analyzer import (
     describe_pr, suggest_labels, review_pr, review_pr_as_comment,
     generate_changelog, suggest_reviewers, generate_standup, create_issues_from_todos,
+    generate_commit_message, run_release,
 )
 
 _RESET = "\033[0m"
@@ -100,6 +101,71 @@ def cmd_changelog(args: argparse.Namespace) -> None:
             new_content = f"# Changelog\n\n{md}\n"
         p.write_text(new_content)
         print(f"\n  {_GREEN}✓{_RESET} Prepended to {changelog_path}")
+    print()
+
+
+def cmd_commit(args: argparse.Namespace) -> None:
+    print(f"\n  {_DIM}Analyzing staged changes...{_RESET}\n")
+    msg = generate_commit_message(_key(), model=args.model)
+
+    print(f"{_BOLD}Commit message:{_RESET}\n")
+    print(f"  {_GREEN}{msg.subject}{_RESET}")
+    if msg.body:
+        print()
+        for line in msg.body.splitlines():
+            print(f"  {line}")
+    if msg.footer:
+        print(f"\n  {_YELLOW}{msg.footer}{_RESET}")
+    if msg.breaking:
+        print(f"\n  {_YELLOW}⚠ Breaking change{_RESET}")
+
+    if args.commit:
+        import subprocess
+        full = msg.format()
+        result = subprocess.run(["git", "commit", "-m", full])
+        if result.returncode == 0:
+            print(f"\n  {_GREEN}✓{_RESET} Committed.")
+        else:
+            print(f"\n  Commit failed — copy the message above and run git commit manually.")
+    elif args.copy:
+        try:
+            import subprocess
+            subprocess.run(["pbcopy"], input=msg.format().encode(), check=True)
+            print(f"\n  {_GREEN}✓{_RESET} Copied to clipboard")
+        except Exception:
+            print(f"\n  {_DIM}(--copy requires macOS pbcopy){_RESET}")
+    print()
+
+
+def cmd_release(args: argparse.Namespace) -> None:
+    repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+    if not repo:
+        print("pr-pilot release: --repo is required (or set GITHUB_REPOSITORY)", file=sys.stderr)
+        sys.exit(1)
+
+    if args.dry_run:
+        print(f"\n  {_DIM}Dry run — nothing will be committed or published{_RESET}\n")
+    else:
+        print(f"\n  {_DIM}Running full release workflow for {repo}...{_RESET}\n")
+
+    release = run_release(
+        _key(),
+        repo=repo,
+        changelog_path=args.changelog,
+        model=args.model,
+        dry_run=args.dry_run,
+    )
+
+    print(f"  {_BOLD}Version:{_RESET}  {_GREEN}{release.tag}{_RESET}")
+    print(f"  {_BOLD}Name:{_RESET}     {release.name}\n")
+    print(release.body)
+
+    if args.dry_run:
+        print(f"\n  {_YELLOW}Dry run complete — no changes made.{_RESET}")
+    else:
+        print(f"\n  {_GREEN}✓{_RESET} CHANGELOG.md updated")
+        print(f"  {_GREEN}✓{_RESET} Committed and tagged {release.tag}")
+        print(f"  {_GREEN}✓{_RESET} GitHub release created")
     print()
 
 
@@ -245,6 +311,23 @@ def main() -> None:
     p_rev.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
     p_rev.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
     p_rev.set_defaults(func=cmd_review)
+
+    # --- commit ---
+    p_commit = sub.add_parser("commit", help="Generate a conventional commit message from staged changes")
+    p_commit.add_argument("--model", default="gpt-4o")
+    p_commit.add_argument("--commit", action="store_true", help="Run git commit with the generated message")
+    p_commit.add_argument("--copy", action="store_true", help="Copy message to clipboard (macOS)")
+    p_commit.set_defaults(func=cmd_commit)
+
+    # --- release ---
+    p_release = sub.add_parser("release", help="Full release: changelog + git tag + GitHub release")
+    p_release.add_argument("--repo", default=None, help="GitHub repo slug (owner/repo)")
+    p_release.add_argument("--model", default="gpt-4o")
+    p_release.add_argument("--changelog", default="CHANGELOG.md", metavar="FILE",
+                           help="Path to CHANGELOG.md (default: CHANGELOG.md)")
+    p_release.add_argument("--dry-run", action="store_true",
+                           help="Preview release without committing or publishing")
+    p_release.set_defaults(func=cmd_release)
 
     # --- reviewers ---
     p_rev2 = sub.add_parser("reviewers", help="Suggest reviewers based on git blame of changed files")

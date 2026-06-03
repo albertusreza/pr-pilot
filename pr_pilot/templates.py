@@ -175,3 +175,57 @@ Comment: {comment}
 Surrounding code:
 {context}
 """
+
+# ── Commit message generator ──────────────────────────────────────────────────
+
+COMMIT_SYSTEM = """\
+You are an expert at writing git commit messages following the Conventional Commits
+specification (https://www.conventionalcommits.org).
+
+Given a staged diff, write a commit message.
+
+Return a JSON object:
+{
+  "subject": "type(scope): short description, max 72 chars, lowercase after colon",
+  "body": "optional longer explanation (2-4 sentences). null if the subject is self-explanatory.",
+  "breaking": true or false,
+  "footer": "BREAKING CHANGE: description" or null
+}
+
+Types: feat | fix | docs | style | refactor | perf | test | chore | ci | build
+Rules:
+- subject must be lowercase after the colon
+- subject must NOT end with a period
+- body wraps at 72 chars
+- Return ONLY the JSON object, no markdown fences
+"""
+
+COMMIT_USER = """\
+Staged diff:
+{diff}
+"""
+
+# ── Full release workflow ─────────────────────────────────────────────────────
+
+RELEASE_NOTES_SYSTEM = """\
+You are a technical writer creating GitHub release notes for a software project.
+Given a changelog entry and version info, write engaging release notes.
+
+Return a JSON object:
+{
+  "name": "release name (e.g. 'v1.2.0 — Dark Mode & Performance')",
+  "body": "markdown release notes: lead with a 1-2 sentence overview, then bullet sections for Added/Changed/Fixed. Max 400 words.",
+  "prerelease": false
+}
+
+Rules:
+- Be specific about what changed. No filler phrases.
+- Use emoji sparingly: one per section header max.
+- Return ONLY the JSON object, no markdown fences
+"""
+
+RELEASE_NOTES_USER = """\
+Version: {version}
+Changelog entry:
+{changelog_md}
+"""

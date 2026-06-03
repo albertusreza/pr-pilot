@@ -100,6 +100,8 @@ pr-pilot describe --markdown pr_description.md
 | `pr-pilot reviewers` | Suggest reviewers based on git blame of changed files |
 | `pr-pilot standup` | Generate a daily standup update from your recent commits |
 | `pr-pilot todos` | Scan for TODO/FIXME comments and create GitHub issues from them |
+| `pr-pilot commit` | Generate a Conventional Commit message from staged changes |
+| `pr-pilot release` | Full release: changelog + git tag + GitHub release in one command |
 
 ## Usage
 
@@ -118,6 +120,20 @@ pr-pilot changelog
 
 # Write directly into CHANGELOG.md
 pr-pilot changelog --output CHANGELOG.md
+```
+
+```bash
+# Generate a commit message from staged changes
+pr-pilot commit
+
+# Run git commit directly with the generated message
+pr-pilot commit --commit
+
+# Full release: bump version + write changelog + create GitHub release
+pr-pilot release --repo owner/repo
+
+# Preview release without publishing
+pr-pilot release --repo owner/repo --dry-run
 ```
 
 ```bash

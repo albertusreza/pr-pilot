@@ -11,6 +11,8 @@ from .templates import (
     REVIEWER_SYSTEM, REVIEWER_USER, REVIEWER_COMMENT_HEADER, REVIEWER_COMMENT_TEMPLATE,
     STANDUP_SYSTEM, STANDUP_USER,
     ISSUE_SYSTEM, ISSUE_USER,
+    COMMIT_SYSTEM, COMMIT_USER,
+    RELEASE_NOTES_SYSTEM, RELEASE_NOTES_USER,
 )
 
 _MAX_DIFF_CHARS = 24_000   # stay well within context limits
@@ -390,3 +392,159 @@ def create_issues_from_todos(
             labels=data.get("labels", ["technical-debt"]),
         ))
     return issues
+
+
+# ── Commit message generator ──────────────────────────────────────────────────
+
+@dataclass
+class CommitMessage:
+    subject: str
+    body: str | None
+    breaking: bool
+    footer: str | None
+
+    def format(self) -> str:
+        parts = [self.subject]
+        if self.body:
+            parts.append("")
+            parts.append(self.body)
+        if self.footer:
+            parts.append("")
+            parts.append(self.footer)
+        return "\n".join(parts)
+
+
+def _get_staged_diff() -> str:
+    diff = _git("diff", "--cached")
+    if len(diff) > _MAX_DIFF_CHARS:
+        diff = diff[:_MAX_DIFF_CHARS] + "\n\n[diff truncated]"
+    return diff
+
+
+def generate_commit_message(api_key: str, model: str = _MODEL) -> CommitMessage:
+    client = OpenAI(api_key=api_key)
+    diff = _get_staged_diff()
+    if not diff:
+        raise ValueError("No staged changes found. Use 'git add' first.")
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=512,
+        messages=[
+            {"role": "system", "content": COMMIT_SYSTEM},
+            {"role": "user", "content": COMMIT_USER.format(diff=diff)},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    data = json.loads(raw.strip())
+    return CommitMessage(
+        subject=data.get("subject", "chore: update"),
+        body=data.get("body") or None,
+        breaking=data.get("breaking", False),
+        footer=data.get("footer") or None,
+    )
+
+
+# ── Full release workflow ─────────────────────────────────────────────────────
+
+@dataclass
+class ReleaseInfo:
+    version: str
+    tag: str
+    name: str
+    body: str
+    prerelease: bool
+
+
+def _generate_release_notes(
+    api_key: str, version: str, changelog_md: str, model: str = _MODEL
+) -> tuple[str, str]:
+    """Return (release_name, release_body)."""
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=1024,
+        messages=[
+            {"role": "system", "content": RELEASE_NOTES_SYSTEM},
+            {"role": "user", "content": RELEASE_NOTES_USER.format(
+                version=version, changelog_md=changelog_md
+            )},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    data = json.loads(raw.strip())
+    return data.get("name", f"v{version}"), data.get("body", changelog_md)
+
+
+def run_release(
+    api_key: str,
+    repo: str,
+    changelog_path: str = "CHANGELOG.md",
+    model: str = _MODEL,
+    dry_run: bool = False,
+) -> ReleaseInfo:
+    """Full release: generate changelog → bump version → create GitHub release."""
+    import datetime
+    from .github_client import _api
+
+    # 1. Generate changelog entry
+    entry, new_version = generate_changelog(api_key, model=model)
+    today = datetime.date.today().isoformat()
+    changelog_md = entry.to_markdown(new_version, today)
+
+    # 2. Write CHANGELOG.md
+    import pathlib
+    p = pathlib.Path(changelog_path)
+    if p.exists():
+        existing = p.read_text()
+        if existing.startswith("# "):
+            header, rest = existing.split("\n", 1)
+            new_content = f"{header}\n\n{changelog_md}\n{rest}"
+        else:
+            new_content = f"{changelog_md}\n\n{existing}"
+    else:
+        new_content = f"# Changelog\n\n{changelog_md}\n"
+
+    if not dry_run:
+        p.write_text(new_content)
+
+    # 3. Generate release notes
+    release_name, release_body = _generate_release_notes(
+        api_key, new_version, changelog_md, model=model
+    )
+    tag = f"v{new_version}"
+
+    if not dry_run:
+        # 4. Commit changelog
+        import subprocess
+        subprocess.run(["git", "add", changelog_path], check=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"chore: release {tag}"],
+            check=True
+        )
+        # 5. Create git tag
+        subprocess.run(["git", "tag", tag], check=True)
+        subprocess.run(["git", "push"], check=True)
+        subprocess.run(["git", "push", "--tags"], check=True)
+        # 6. Create GitHub release
+        _api("POST", f"/repos/{repo}/releases", {
+            "tag_name": tag,
+            "name": release_name,
+            "body": release_body,
+            "prerelease": False,
+        })
+
+    return ReleaseInfo(
+        version=new_version,
+        tag=tag,
+        name=release_name,
+        body=release_body,
+        prerelease=False,
+    )

@@ -1,10 +1,12 @@
 from __future__ import annotations
 import json
+import pytest
 from unittest.mock import MagicMock, patch
 from pr_pilot.analyzer import (
     describe_pr, suggest_labels, review_pr, PRDescription,
     review_pr_as_comment, generate_changelog, ChangelogEntry,
     suggest_reviewers, generate_standup, create_issues_from_todos, _bump_version,
+    generate_commit_message, CommitMessage, run_release,
 )
 from pr_pilot.templates import REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER
 
@@ -238,3 +240,81 @@ def test_create_issues_from_todos(tmp_path):
     assert len(issues) == 1
     assert issues[0].title == "Fix slow foo()"
     assert "technical-debt" in issues[0].labels
+
+
+# ── Commit message generator tests ───────────────────────────────────────────
+
+@patch("pr_pilot.analyzer._get_staged_diff", return_value="+ def login(user, password):\n+     return auth(user)")
+def test_generate_commit_message_basic(mock_diff):
+    payload = {
+        "subject": "feat(auth): add login function",
+        "body": "Implements basic login using the auth helper.",
+        "breaking": False,
+        "footer": None,
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        msg = generate_commit_message("fake-key")
+    assert msg.subject == "feat(auth): add login function"
+    assert msg.breaking is False
+    assert msg.footer is None
+
+
+@patch("pr_pilot.analyzer._get_staged_diff", return_value="")
+def test_generate_commit_message_no_staged(mock_diff):
+    with pytest.raises(ValueError, match="No staged changes"):
+        generate_commit_message("fake-key")
+
+
+def test_commit_message_format_full():
+    msg = CommitMessage(
+        subject="feat(api): add rate limiting",
+        body="Adds sliding window rate limiting to all endpoints.",
+        breaking=True,
+        footer="BREAKING CHANGE: Rate limit headers are now always present.",
+    )
+    formatted = msg.format()
+    assert "feat(api): add rate limiting" in formatted
+    assert "sliding window" in formatted
+    assert "BREAKING CHANGE" in formatted
+
+
+def test_commit_message_format_subject_only():
+    msg = CommitMessage(subject="chore: update deps", body=None, breaking=False, footer=None)
+    assert msg.format() == "chore: update deps"
+
+
+# ── Release workflow tests ────────────────────────────────────────────────────
+
+@patch("pr_pilot.analyzer._get_commits_since_tag", return_value="abc Fix login\ndef Add dark mode")
+@patch("pr_pilot.analyzer._get_current_version", return_value="1.0.0")
+@patch("pr_pilot.analyzer.get_diff", return_value="+ new code")
+@patch("pr_pilot.analyzer.get_commits", return_value="")
+@patch("pr_pilot.analyzer.get_branch", return_value="main")
+def test_run_release_dry_run(mock_branch, mock_commits, mock_diff, mock_ver, mock_ctag, tmp_path):
+    changelog_payload = {
+        "version": "minor", "highlights": "New features.",
+        "added": ["Dark mode"], "changed": [], "fixed": ["Login bug"],
+        "removed": [], "security": [],
+    }
+    release_payload = {
+        "name": "v1.1.0 — Dark Mode",
+        "body": "## What's new\n- Dark mode added\n- Login bug fixed",
+        "prerelease": False,
+    }
+    responses = [
+        _mock_openai_response(json.dumps(changelog_payload)),
+        _mock_openai_response(json.dumps(release_payload)),
+    ]
+    changelog_file = str(tmp_path / "CHANGELOG.md")
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.side_effect = responses
+        release = run_release("fake-key", repo="owner/repo",
+                              changelog_path=changelog_file, dry_run=True)
+    assert release.version == "1.1.0"
+    assert release.tag == "v1.1.0"
+    assert "Dark Mode" in release.name
+    # dry run: changelog file should NOT be written
+    import pathlib
+    assert not pathlib.Path(changelog_file).exists()
