@@ -97,6 +97,9 @@ pr-pilot describe --markdown pr_description.md
 | `pr-pilot review` | Get a senior-engineer-style code review in the terminal |
 | `pr-pilot comment` | Post an AI review as a GitHub PR comment (updates on re-run, no spam) |
 | `pr-pilot changelog` | Generate a `CHANGELOG.md` entry from commits since last tag |
+| `pr-pilot reviewers` | Suggest reviewers based on git blame of changed files |
+| `pr-pilot standup` | Generate a daily standup update from your recent commits |
+| `pr-pilot todos` | Scan for TODO/FIXME comments and create GitHub issues from them |
 
 ## Usage
 
@@ -115,6 +118,26 @@ pr-pilot changelog
 
 # Write directly into CHANGELOG.md
 pr-pilot changelog --output CHANGELOG.md
+```
+
+```bash
+# Suggest reviewers for your current branch
+pr-pilot reviewers --base main
+
+# Post suggestion as a comment + assign on GitHub
+pr-pilot reviewers --post --assign --repo owner/repo --pr 42
+
+# Generate a standup from yesterday's commits
+pr-pilot standup
+
+# Generate from the last 3 days and copy to clipboard
+pr-pilot standup --days 3 --copy
+
+# Scan for TODO/FIXME and preview issues
+pr-pilot todos
+
+# Actually create GitHub issues from them
+pr-pilot todos --create --repo owner/repo
 ```
 
 ### Auto-comment on every PR (GitHub Action)

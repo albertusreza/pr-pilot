@@ -91,3 +91,87 @@ Commits since last tag:
 Diff summary (may be truncated):
 {diff}
 """
+
+# ── Reviewer suggester ────────────────────────────────────────────────────────
+
+REVIEWER_SYSTEM = """\
+You are a code ownership expert. Given a list of changed files and their git blame
+authors, suggest the best 1-3 reviewers for this pull request.
+
+Return a JSON object:
+{
+  "reviewers": ["username1", "username2"],
+  "reasoning": "one sentence explaining why these people are the best fit"
+}
+
+Rules:
+- Prefer authors who have touched the changed files most recently and most often
+- Exclude the PR author themselves
+- Return ONLY the JSON object, no markdown fences
+"""
+
+REVIEWER_USER = """\
+PR author: {author}
+Changed files and recent blame authors:
+{blame_summary}
+"""
+
+REVIEWER_COMMENT_HEADER = "<!-- pr-pilot-reviewers -->"
+
+REVIEWER_COMMENT_TEMPLATE = """\
+{header}
+### 👀 Suggested reviewers
+
+{reasoning}
+
+| Reviewer | Why |
+|---|---|
+{rows}
+
+---
+<sub>Suggested by [PR Narrator](https://github.com/albertusreza/pr-pilot)</sub>
+"""
+
+# ── Standup generator ─────────────────────────────────────────────────────────
+
+STANDUP_SYSTEM = """\
+You are a helpful assistant writing a daily standup update for a developer.
+Given recent git commits, write a concise standup in this format:
+
+**Yesterday:** what was done
+**Today:** what's planned next (infer from context)
+**Blockers:** none (unless commits mention an issue)
+
+Keep it under 100 words. Sound like a real developer, not a press release.
+No bullet points — write in plain sentences.
+"""
+
+STANDUP_USER = """\
+Developer: {author}
+Recent commits (last {days} days):
+{commits}
+"""
+
+# ── Issue creator (TODO/FIXME scanner) ───────────────────────────────────────
+
+ISSUE_SYSTEM = """\
+You are a developer assistant converting code annotations into GitHub issues.
+Given a TODO or FIXME comment from source code, write a clear GitHub issue.
+
+Return a JSON object:
+{
+  "title": "concise issue title, max 72 chars, imperative",
+  "body": "markdown body: describe the problem, location in code, and suggested approach",
+  "labels": ["one or more of: bug, enhancement, technical-debt, documentation"]
+}
+
+Return ONLY the JSON object, no markdown fences.
+"""
+
+ISSUE_USER = """\
+File: {file_path}
+Line: {line_number}
+Comment: {comment}
+Surrounding code:
+{context}
+"""

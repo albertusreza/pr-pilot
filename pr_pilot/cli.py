@@ -3,7 +3,10 @@ import argparse
 import os
 import sys
 
-from .analyzer import describe_pr, suggest_labels, review_pr, review_pr_as_comment, generate_changelog
+from .analyzer import (
+    describe_pr, suggest_labels, review_pr, review_pr_as_comment,
+    generate_changelog, suggest_reviewers, generate_standup, create_issues_from_todos,
+)
 
 _RESET = "\033[0m"
 _BOLD  = "\033[1m"
@@ -100,6 +103,91 @@ def cmd_changelog(args: argparse.Namespace) -> None:
     print()
 
 
+def cmd_reviewers(args: argparse.Namespace) -> None:
+    from .github_client import upsert_comment
+    from .templates import REVIEWER_COMMENT_HEADER
+
+    suggestion = suggest_reviewers(_key(), base=args.base, model=args.model)
+
+    print(f"\n  {_BOLD}Suggested reviewers:{_RESET}")
+    for r in suggestion.reviewers:
+        print(f"  {_GREEN}•{_RESET} @{r}")
+    print(f"\n  {_DIM}{suggestion.reasoning}{_RESET}")
+
+    if args.post:
+        repo   = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+        pr_num = args.pr   or int(os.environ.get("PR_NUMBER", "0"))
+        if not repo or not pr_num:
+            print("  --post requires --repo and --pr (or GITHUB_REPOSITORY/PR_NUMBER)", file=sys.stderr)
+            sys.exit(1)
+        url = upsert_comment(repo, pr_num, suggestion.to_comment(), REVIEWER_COMMENT_HEADER)
+        print(f"\n  {_GREEN}✓{_RESET} Comment posted: {url}")
+
+        if args.assign and suggestion.reviewers:
+            from .github_client import _api
+            _api("POST", f"/repos/{repo}/pulls/{pr_num}/requested_reviewers",
+                 {"reviewers": suggestion.reviewers})
+            print(f"  {_GREEN}✓{_RESET} Reviewers assigned: {', '.join(suggestion.reviewers)}")
+    print()
+
+
+def cmd_standup(args: argparse.Namespace) -> None:
+    print(f"\n  {_DIM}Generating standup from last {args.days} day(s) of commits...{_RESET}\n")
+    update = generate_standup(_key(), days=args.days, model=args.model)
+    print(update)
+    if args.copy:
+        try:
+            import subprocess
+            subprocess.run(["pbcopy"], input=update.encode(), check=True)
+            print(f"\n  {_GREEN}✓{_RESET} Copied to clipboard")
+        except Exception:
+            print(f"\n  {_DIM}(--copy requires macOS pbcopy){_RESET}")
+    print()
+
+
+def cmd_todos(args: argparse.Namespace) -> None:
+    from .github_client import _api
+
+    print(f"\n  {_DIM}Scanning for TODO/FIXME comments in {args.path}...{_RESET}\n")
+    issues = create_issues_from_todos(_key(), root=args.path, model=args.model)
+
+    if not issues:
+        print("  No TODO/FIXME comments found.")
+        return
+
+    print(f"  Found {_BOLD}{len(issues)}{_RESET} item(s):\n")
+    for i, issue in enumerate(issues, 1):
+        print(f"  {_BOLD}{i}.{_RESET} {issue.title}")
+        print(f"     {_DIM}{issue.file_path}:{issue.line_number}{_RESET}  "
+              f"{_CYAN}[{', '.join(issue.labels)}]{_RESET}")
+
+    if args.create:
+        repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+        if not repo:
+            print("\n  --create requires --repo or GITHUB_REPOSITORY", file=sys.stderr)
+            sys.exit(1)
+        print()
+        created = 0
+        for issue in issues:
+            # Ensure labels exist
+            for label in issue.labels:
+                try:
+                    _api("POST", f"/repos/{repo}/labels",
+                         {"name": label, "color": "e4e669"})
+                except SystemExit:
+                    pass
+            data = _api("POST", f"/repos/{repo}/issues", {
+                "title": issue.title,
+                "body": issue.body,
+                "labels": issue.labels,
+            })
+            print(f"  {_GREEN}✓{_RESET} #{data['number']} {issue.title}")
+            print(f"     {_DIM}{data['html_url']}{_RESET}")
+            created += 1
+        print(f"\n  {created} issue(s) created.\n")
+    print()
+
+
 def cmd_action(args: argparse.Namespace) -> None:
     """Run as a GitHub Action — reads env vars set by the Actions runner."""
     import json as _json
@@ -157,6 +245,31 @@ def main() -> None:
     p_rev.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
     p_rev.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
     p_rev.set_defaults(func=cmd_review)
+
+    # --- reviewers ---
+    p_rev2 = sub.add_parser("reviewers", help="Suggest reviewers based on git blame of changed files")
+    p_rev2.add_argument("--base", default="main")
+    p_rev2.add_argument("--model", default="gpt-4o")
+    p_rev2.add_argument("--post", action="store_true", help="Post suggestion as a PR comment")
+    p_rev2.add_argument("--assign", action="store_true", help="Also assign the reviewers on GitHub")
+    p_rev2.add_argument("--repo", default=None)
+    p_rev2.add_argument("--pr", type=int, default=None)
+    p_rev2.set_defaults(func=cmd_reviewers)
+
+    # --- standup ---
+    p_stand = sub.add_parser("standup", help="Generate a daily standup from recent commits")
+    p_stand.add_argument("--days", type=int, default=1, help="How many days back to look (default: 1)")
+    p_stand.add_argument("--model", default="gpt-4o")
+    p_stand.add_argument("--copy", action="store_true", help="Copy output to clipboard (macOS)")
+    p_stand.set_defaults(func=cmd_standup)
+
+    # --- todos ---
+    p_todos = sub.add_parser("todos", help="Scan for TODO/FIXME comments and create GitHub issues")
+    p_todos.add_argument("path", nargs="?", default=".", help="Directory to scan (default: .)")
+    p_todos.add_argument("--model", default="gpt-4o")
+    p_todos.add_argument("--create", action="store_true", help="Create GitHub issues from found TODOs")
+    p_todos.add_argument("--repo", default=None, help="GitHub repo slug (required with --create)")
+    p_todos.set_defaults(func=cmd_todos)
 
     # --- comment ---
     p_com = sub.add_parser("comment", help="Post an AI review as a GitHub PR comment")

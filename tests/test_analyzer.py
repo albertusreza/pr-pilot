@@ -4,8 +4,9 @@ from unittest.mock import MagicMock, patch
 from pr_pilot.analyzer import (
     describe_pr, suggest_labels, review_pr, PRDescription,
     review_pr_as_comment, generate_changelog, ChangelogEntry,
+    suggest_reviewers, generate_standup, create_issues_from_todos, _bump_version,
 )
-from pr_pilot.templates import REVIEW_COMMENT_HEADER
+from pr_pilot.templates import REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER
 
 
 def _mock_openai_response(content: str) -> MagicMock:
@@ -156,7 +157,84 @@ def test_changelog_entry_to_markdown():
 
 
 def test_version_bump():
-    from pr_pilot.analyzer import _bump_version
     assert _bump_version("1.2.3", "patch") == "1.2.4"
     assert _bump_version("1.2.3", "minor") == "1.3.0"
     assert _bump_version("1.2.3", "major") == "2.0.0"
+
+
+# ── Reviewer suggester tests ──────────────────────────────────────────────────
+
+@patch("pr_pilot.analyzer._get_blame_summary", return_value=("alice", "  src/auth.py: bob, carol\n  src/api.py: bob"))
+def test_suggest_reviewers_basic(mock_blame):
+    payload = {"reviewers": ["bob", "carol"], "reasoning": "They own auth.py and api.py"}
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        result = suggest_reviewers("fake-key")
+    assert "bob" in result.reviewers
+    assert "carol" in result.reviewers
+    assert result.reasoning
+
+
+def test_reviewer_suggestion_to_comment():
+    from pr_pilot.analyzer import ReviewerSuggestion
+    s = ReviewerSuggestion(reviewers=["bob"], reasoning="Bob owns the changed files")
+    comment = s.to_comment()
+    assert REVIEWER_COMMENT_HEADER in comment
+    assert "@bob" in comment
+    assert "Bob owns" in comment
+
+
+# ── Standup generator tests ───────────────────────────────────────────────────
+
+@patch("pr_pilot.analyzer._git", side_effect=lambda *a: {
+    ("config", "user.name"): "Alice",
+}.get(a, "abc123 Fix login bug\ndef456 Add dark mode"))
+def test_generate_standup(mock_git):
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response("**Yesterday:** Fixed login bug and added dark mode.\n**Today:** Writing tests.\n**Blockers:** None.")
+        result = generate_standup("fake-key", days=1)
+    assert "Yesterday" in result
+    assert "Today" in result
+
+
+@patch("pr_pilot.analyzer._git", return_value="")
+def test_generate_standup_no_commits(mock_git):
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response("")
+        result = generate_standup("fake-key", days=1)
+    assert result == "No recent commits found."
+
+
+# ── TODO/FIXME issue creator tests ───────────────────────────────────────────
+
+def test_scan_todos_finds_items(tmp_path):
+    from pr_pilot.analyzer import _scan_todos
+    (tmp_path / "app.py").write_text("x = 1\n# TODO: fix this properly\ny = 2\n")
+    results = _scan_todos(str(tmp_path))
+    assert len(results) == 1
+    assert "fix this properly" in results[0][2]
+    assert results[0][1] == 2  # line number
+
+
+def test_scan_todos_skips_node_modules(tmp_path):
+    from pr_pilot.analyzer import _scan_todos
+    nm = tmp_path / "node_modules" / "lib"
+    nm.mkdir(parents=True)
+    (nm / "index.js").write_text("// TODO: upstream bug\n")
+    results = _scan_todos(str(tmp_path))
+    assert results == []
+
+
+def test_create_issues_from_todos(tmp_path):
+    (tmp_path / "utils.py").write_text("def foo():\n    # FIXME: this is slow\n    pass\n")
+    payload = {"title": "Fix slow foo()", "body": "The function is slow.", "labels": ["technical-debt"]}
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        issues = create_issues_from_todos("fake-key", root=str(tmp_path))
+    assert len(issues) == 1
+    assert issues[0].title == "Fix slow foo()"
+    assert "technical-debt" in issues[0].labels

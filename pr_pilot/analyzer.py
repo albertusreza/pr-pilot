@@ -8,6 +8,9 @@ from openai import OpenAI
 from .templates import (
     DESCRIBE_SYSTEM, DESCRIBE_USER, LABEL_SYSTEM, REVIEW_SYSTEM,
     CHANGELOG_SYSTEM, CHANGELOG_USER, REVIEW_COMMENT_HEADER, REVIEW_COMMENT_TEMPLATE,
+    REVIEWER_SYSTEM, REVIEWER_USER, REVIEWER_COMMENT_HEADER, REVIEWER_COMMENT_TEMPLATE,
+    STANDUP_SYSTEM, STANDUP_USER,
+    ISSUE_SYSTEM, ISSUE_USER,
 )
 
 _MAX_DIFF_CHARS = 24_000   # stay well within context limits
@@ -230,3 +233,160 @@ def generate_changelog(api_key: str, model: str = _MODEL) -> tuple[ChangelogEntr
     )
     new_version = _bump_version(current, entry.version_bump)
     return entry, new_version
+
+
+# ── Reviewer suggester ────────────────────────────────────────────────────────
+
+@dataclass
+class ReviewerSuggestion:
+    reviewers: list[str]
+    reasoning: str
+
+    def to_comment(self) -> str:
+        rows = "\n".join(f"| @{r} | {self.reasoning} |" for r in self.reviewers)
+        return REVIEWER_COMMENT_TEMPLATE.format(
+            header=REVIEWER_COMMENT_HEADER,
+            reasoning=self.reasoning,
+            rows=rows,
+        )
+
+
+def _get_blame_summary(base: str = "main") -> tuple[str, str]:
+    """Return (author, blame_summary) for files changed vs base."""
+    author = _git("config", "user.name") or "unknown"
+    changed_files = _git("diff", f"{base}...HEAD", "--name-only").splitlines()
+    lines = []
+    for f in changed_files[:15]:  # cap at 15 files
+        blame = _git("log", "--follow", "--format=%an", "-5", "--", f)
+        authors = ", ".join(dict.fromkeys(blame.splitlines()))  # unique, ordered
+        lines.append(f"  {f}: {authors or 'no history'}")
+    return author, "\n".join(lines)
+
+
+def suggest_reviewers(api_key: str, base: str = "main", model: str = _MODEL) -> ReviewerSuggestion:
+    client = OpenAI(api_key=api_key)
+    author, blame_summary = _get_blame_summary(base)
+    if not blame_summary:
+        raise ValueError("No changed files found — nothing to base reviewer suggestion on.")
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=256,
+        messages=[
+            {"role": "system", "content": REVIEWER_SYSTEM},
+            {"role": "user", "content": REVIEWER_USER.format(author=author, blame_summary=blame_summary)},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    data = json.loads(raw.strip())
+    return ReviewerSuggestion(
+        reviewers=data.get("reviewers", []),
+        reasoning=data.get("reasoning", ""),
+    )
+
+
+# ── Standup generator ─────────────────────────────────────────────────────────
+
+def generate_standup(api_key: str, days: int = 1, model: str = _MODEL) -> str:
+    client = OpenAI(api_key=api_key)
+    author = _git("config", "user.name") or "developer"
+    since = f"{days} day ago" if days == 1 else f"{days} days ago"
+    commits = _git("log", f"--since={since}", "--oneline", "--no-merges",
+                   f"--author={author}")
+    if not commits:
+        commits = _git("log", "--oneline", "--no-merges", "-10")
+    if not commits:
+        return "No recent commits found."
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=256,
+        messages=[
+            {"role": "system", "content": STANDUP_SYSTEM},
+            {"role": "user", "content": STANDUP_USER.format(
+                author=author, days=days, commits=commits
+            )},
+        ],
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+# ── Issue creator (TODO/FIXME scanner) ───────────────────────────────────────
+
+@dataclass
+class TodoIssue:
+    file_path: str
+    line_number: int
+    comment: str
+    title: str
+    body: str
+    labels: list[str]
+
+
+def _scan_todos(root: str = ".") -> list[tuple[str, int, str, str]]:
+    """Return list of (file, lineno, comment_text, context) for TODO/FIXME."""
+    import re
+    from pathlib import Path
+    pattern = re.compile(r'(TODO|FIXME|HACK|XXX)\s*:?\s*(.+)', re.IGNORECASE)
+    skip = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'}
+    results = []
+    for path in Path(root).rglob('*'):
+        if any(p in skip for p in path.parts):
+            continue
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in {'.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rb', '.java', '.md'}:
+            continue
+        try:
+            lines = path.read_text(errors='replace').splitlines()
+        except Exception:
+            continue
+        for i, line in enumerate(lines, 1):
+            m = pattern.search(line)
+            if m:
+                start = max(0, i - 3)
+                end = min(len(lines), i + 3)
+                context = '\n'.join(lines[start:end])
+                results.append((str(path), i, m.group(0).strip(), context))
+    return results
+
+
+def create_issues_from_todos(
+    api_key: str, root: str = ".", model: str = _MODEL
+) -> list[TodoIssue]:
+    client = OpenAI(api_key=api_key)
+    todos = _scan_todos(root)
+    issues = []
+    for file_path, line_number, comment, context in todos:
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=512,
+            messages=[
+                {"role": "system", "content": ISSUE_SYSTEM},
+                {"role": "user", "content": ISSUE_USER.format(
+                    file_path=file_path, line_number=line_number,
+                    comment=comment, context=context,
+                )},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "{}").strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.splitlines()[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.splitlines()[:-1])
+        try:
+            data = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            continue
+        issues.append(TodoIssue(
+            file_path=file_path,
+            line_number=line_number,
+            comment=comment,
+            title=data.get("title", comment[:72]),
+            body=data.get("body", ""),
+            labels=data.get("labels", ["technical-debt"]),
+        ))
+    return issues
