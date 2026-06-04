@@ -7,6 +7,7 @@ from .analyzer import (
     describe_pr, suggest_labels, review_pr, review_pr_as_comment,
     generate_changelog, suggest_reviewers, generate_standup, create_issues_from_todos,
     generate_commit_message, run_release,
+    generate_docstrings, suggest_branch, explain_code,
 )
 
 _RESET = "\033[0m"
@@ -169,6 +170,78 @@ def cmd_release(args: argparse.Namespace) -> None:
     print()
 
 
+def cmd_docs(args: argparse.Namespace) -> None:
+    import os as _os
+    files = args.files
+    if not files:
+        # Default: Python/JS/TS files changed vs base
+        from .analyzer import _git
+        changed = _git("diff", f"{args.base}...HEAD", "--name-only").splitlines()
+        files = [f for f in changed
+                 if f.endswith((".py", ".js", ".ts", ".tsx", ".jsx")) and _os.path.exists(f)]
+    if not files:
+        print("  No changed source files found. Pass file paths as arguments.")
+        return
+
+    for file_path in files:
+        print(f"\n  {_DIM}Generating docstrings for {file_path}...{_RESET}\n")
+        results = generate_docstrings(_key(), file_path, model=args.model)
+        if not results:
+            print(f"  No functions found in {file_path}")
+            continue
+        for r in results:
+            delim = '"""' if r.language == "python" else "/**"
+            delim_end = '"""' if r.language == "python" else " */"
+            print(f"  {_BOLD}{r.function_name}{_RESET}  {_DIM}({r.placement}){_RESET}")
+            print(f"  {_DIM}{delim}{_RESET}")
+            for line in r.docstring.splitlines():
+                prefix = "   " if r.language != "python" else "    "
+                print(f"  {prefix}{line}")
+            print(f"  {_DIM}{delim_end}{_RESET}\n")
+    print()
+
+
+def cmd_branch(args: argparse.Namespace) -> None:
+    task = " ".join(args.task)
+    if not task:
+        print("pr-pilot branch: provide a task description", file=sys.stderr)
+        sys.exit(1)
+    print(f"\n  {_DIM}Generating branch names for: \"{task}\"{_RESET}\n")
+    suggestion = suggest_branch(_key(), task=task, model=args.model)
+    for i, name in enumerate(suggestion.suggestions):
+        marker = f"{_GREEN}★{_RESET}" if i == suggestion.recommended else " "
+        print(f"  {marker} {_BOLD}{name}{_RESET}")
+
+    if args.checkout:
+        import subprocess
+        best = suggestion.best
+        result = subprocess.run(["git", "checkout", "-b", best])
+        if result.returncode == 0:
+            print(f"\n  {_GREEN}✓{_RESET} Switched to new branch '{best}'")
+        else:
+            print(f"\n  Could not create branch — it may already exist.")
+    elif args.copy:
+        try:
+            import subprocess
+            subprocess.run(["pbcopy"], input=suggestion.best.encode(), check=True)
+            print(f"\n  {_GREEN}✓{_RESET} '{suggestion.best}' copied to clipboard")
+        except Exception:
+            pass
+    print()
+
+
+def cmd_explain(args: argparse.Namespace) -> None:
+    import os as _os
+    if not _os.path.exists(args.file):
+        print(f"pr-pilot explain: file not found: {args.file}", file=sys.stderr)
+        sys.exit(1)
+    selector_label = f" → {args.function}" if args.function else ""
+    print(f"\n  {_DIM}Explaining {args.file}{selector_label}...{_RESET}\n")
+    explanation = explain_code(_key(), args.file, selector=args.function, model=args.model)
+    print(explanation)
+    print()
+
+
 def cmd_reviewers(args: argparse.Namespace) -> None:
     from .github_client import upsert_comment
     from .templates import REVIEWER_COMMENT_HEADER
@@ -311,6 +384,28 @@ def main() -> None:
     p_rev.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
     p_rev.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
     p_rev.set_defaults(func=cmd_review)
+
+    # --- docs ---
+    p_docs = sub.add_parser("docs", help="Generate docstrings for functions in changed files")
+    p_docs.add_argument("files", nargs="*", help="Files to document (default: changed files vs base)")
+    p_docs.add_argument("--base", default="main")
+    p_docs.add_argument("--model", default="gpt-4o")
+    p_docs.set_defaults(func=cmd_docs)
+
+    # --- branch ---
+    p_branch = sub.add_parser("branch", help="Suggest a git branch name from a task description")
+    p_branch.add_argument("task", nargs="+", help="Plain-English task description")
+    p_branch.add_argument("--model", default="gpt-4o")
+    p_branch.add_argument("--checkout", action="store_true", help="Run git checkout -b with the best suggestion")
+    p_branch.add_argument("--copy", action="store_true", help="Copy best suggestion to clipboard (macOS)")
+    p_branch.set_defaults(func=cmd_branch)
+
+    # --- explain ---
+    p_explain = sub.add_parser("explain", help="Explain what a file or function does in plain English")
+    p_explain.add_argument("file", help="File to explain")
+    p_explain.add_argument("--function", "-f", default=None, help="Specific function or class to explain")
+    p_explain.add_argument("--model", default="gpt-4o")
+    p_explain.set_defaults(func=cmd_explain)
 
     # --- commit ---
     p_commit = sub.add_parser("commit", help="Generate a conventional commit message from staged changes")

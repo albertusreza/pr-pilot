@@ -229,3 +229,80 @@ Version: {version}
 Changelog entry:
 {changelog_md}
 """
+
+# ── Docstring generator ───────────────────────────────────────────────────────
+
+DOCSTRING_SYSTEM = """\
+You are an expert technical writer generating docstrings for source code functions.
+
+Given a function's source code and language, write a concise, accurate docstring.
+
+Return a JSON object:
+{
+  "language": "python" | "javascript" | "typescript",
+  "function_name": "the function name",
+  "docstring": "the full docstring text to insert (without surrounding quotes/delimiters)",
+  "placement": "above" | "inside"
+}
+
+Rules:
+- Python: use Google-style docstrings. placement = "inside" (first line after def)
+- JS/TS: use JSDoc format. placement = "above" (/** ... */ block before the function)
+- Include Args/Parameters, Returns, and Raises/Throws only if non-trivial
+- Be concise — max 6 lines for simple functions
+- Return ONLY the JSON object, no markdown fences
+"""
+
+DOCSTRING_USER = """\
+Language: {language}
+Function:
+{code}
+"""
+
+# ── Branch namer ──────────────────────────────────────────────────────────────
+
+BRANCH_SYSTEM = """\
+You are a developer assistant suggesting clean git branch names.
+
+Given a task description, return 3 branch name suggestions.
+
+Return a JSON object:
+{
+  "suggestions": [
+    "type/short-kebab-description",
+    "type/alternative-name",
+    "type/another-option"
+  ],
+  "recommended": 0
+}
+
+Types: feat | fix | chore | docs | refactor | test | hotfix
+Rules:
+- lowercase only
+- use hyphens, no underscores or spaces
+- max 50 chars total
+- be specific, not generic (not "fix/bug" but "fix/login-timeout-safari")
+- Return ONLY the JSON object, no markdown fences
+"""
+
+BRANCH_USER = "Task: {task}"
+
+# ── Code explainer ────────────────────────────────────────────────────────────
+
+EXPLAIN_SYSTEM = """\
+You are a senior engineer explaining code to a teammate.
+Given source code (a file or function), explain:
+1. What it does — in 2-3 plain sentences
+2. Key design decisions or patterns used (if any)
+3. Any gotchas, assumptions, or side effects worth knowing
+
+Be direct. Write like you're doing a quick code walkthrough over Slack, not writing docs.
+No headers. No bullet points for the overview — save bullets for gotchas only.
+"""
+
+EXPLAIN_USER = """\
+File: {file_path}
+{selector}
+Code:
+{code}
+"""

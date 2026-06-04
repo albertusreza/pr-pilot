@@ -7,6 +7,8 @@ from pr_pilot.analyzer import (
     review_pr_as_comment, generate_changelog, ChangelogEntry,
     suggest_reviewers, generate_standup, create_issues_from_todos, _bump_version,
     generate_commit_message, CommitMessage, run_release,
+    generate_docstrings, suggest_branch, explain_code,
+    _extract_functions, _detect_language,
 )
 from pr_pilot.templates import REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER
 
@@ -292,7 +294,7 @@ def test_commit_message_format_subject_only():
 @patch("pr_pilot.analyzer.get_diff", return_value="+ new code")
 @patch("pr_pilot.analyzer.get_commits", return_value="")
 @patch("pr_pilot.analyzer.get_branch", return_value="main")
-def test_run_release_dry_run(mock_branch, mock_commits, mock_diff, mock_ver, mock_ctag, tmp_path):
+def test_run_release_dry_run(mock_branch, mock_commits, mock_diff, mock_ver, mock_ctag, tmp_path):  # noqa: E501
     changelog_payload = {
         "version": "minor", "highlights": "New features.",
         "added": ["Dark mode"], "changed": [], "fixed": ["Login bug"],
@@ -318,3 +320,96 @@ def test_run_release_dry_run(mock_branch, mock_commits, mock_diff, mock_ver, moc
     # dry run: changelog file should NOT be written
     import pathlib
     assert not pathlib.Path(changelog_file).exists()
+
+
+# ── Docstring generator tests ─────────────────────────────────────────────────
+
+def test_detect_language():
+    assert _detect_language("app.py") == "python"
+    assert _detect_language("index.ts") == "typescript"
+    assert _detect_language("utils.tsx") == "typescript"
+    assert _detect_language("main.js") == "javascript"
+
+
+def test_extract_functions_python():
+    code = "x = 1\n\ndef foo(a, b):\n    return a + b\n\ndef bar():\n    pass\n"
+    funcs = _extract_functions(code, "python")
+    assert len(funcs) == 2
+    assert "def foo" in funcs[0][0]
+    assert funcs[0][1] == 3  # line number
+
+
+def test_generate_docstrings(tmp_path):
+    py_file = tmp_path / "utils.py"
+    py_file.write_text("def add(a, b):\n    return a + b\n")
+    payload = {
+        "language": "python",
+        "function_name": "add",
+        "docstring": "Add two numbers and return the result.",
+        "placement": "inside",
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        results = generate_docstrings("fake-key", str(py_file))
+    assert len(results) == 1
+    assert results[0].function_name == "add"
+    assert "Add two numbers" in results[0].docstring
+    assert results[0].placement == "inside"
+
+
+def test_generate_docstrings_no_functions(tmp_path):
+    py_file = tmp_path / "constants.py"
+    py_file.write_text("MAX = 100\nMIN = 0\n")
+    results = generate_docstrings("fake-key", str(py_file))
+    assert results == []
+
+
+# ── Branch namer tests ────────────────────────────────────────────────────────
+
+def test_suggest_branch_basic():
+    payload = {
+        "suggestions": ["feat/add-dark-mode", "feat/dark-mode-toggle", "feat/theme-switcher"],
+        "recommended": 0,
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        result = suggest_branch("fake-key", task="add dark mode to settings page")
+    assert result.best == "feat/add-dark-mode"
+    assert len(result.suggestions) == 3
+    assert result.recommended == 0
+
+
+def test_suggest_branch_recommended_index():
+    payload = {
+        "suggestions": ["fix/login-bug", "fix/auth-timeout", "fix/session-expiry"],
+        "recommended": 2,
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        result = suggest_branch("fake-key", task="fix session expiry on mobile")
+    assert result.best == "fix/session-expiry"
+
+
+# ── Code explainer tests ──────────────────────────────────────────────────────
+
+def test_explain_code_file(tmp_path):
+    py_file = tmp_path / "auth.py"
+    py_file.write_text("def authenticate(user, password):\n    return user == 'admin'\n")
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response("This file handles basic authentication by comparing credentials.")
+        result = explain_code("fake-key", str(py_file))
+    assert "authentication" in result.lower()
+
+
+def test_explain_code_with_selector(tmp_path):
+    py_file = tmp_path / "utils.py"
+    py_file.write_text("def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n")
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response("The add function takes two numbers and returns their sum.")
+        result = explain_code("fake-key", str(py_file), selector="add")
+    assert "add" in result.lower() or "sum" in result.lower()

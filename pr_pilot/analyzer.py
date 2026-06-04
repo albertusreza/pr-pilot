@@ -13,6 +13,9 @@ from .templates import (
     ISSUE_SYSTEM, ISSUE_USER,
     COMMIT_SYSTEM, COMMIT_USER,
     RELEASE_NOTES_SYSTEM, RELEASE_NOTES_USER,
+    DOCSTRING_SYSTEM, DOCSTRING_USER,
+    BRANCH_SYSTEM, BRANCH_USER,
+    EXPLAIN_SYSTEM, EXPLAIN_USER,
 )
 
 _MAX_DIFF_CHARS = 24_000   # stay well within context limits
@@ -548,3 +551,170 @@ def run_release(
         body=release_body,
         prerelease=False,
     )
+
+
+# ── Docstring generator ───────────────────────────────────────────────────────
+
+@dataclass
+class DocstringResult:
+    language: str
+    function_name: str
+    docstring: str
+    placement: str   # "above" | "inside"
+
+
+def _detect_language(path: str) -> str:
+    ext = path.rsplit(".", 1)[-1].lower()
+    if ext == "py":
+        return "python"
+    if ext in {"ts", "tsx"}:
+        return "typescript"
+    return "javascript"
+
+
+def _extract_functions(code: str, language: str) -> list[tuple[str, int]]:
+    """Return list of (function_source, start_line) for top-level functions."""
+    import re
+    lines = code.splitlines()
+    results = []
+    if language == "python":
+        pattern = re.compile(r"^(def |async def )")
+        i = 0
+        while i < len(lines):
+            if pattern.match(lines[i]):
+                start = i
+                # collect until next top-level def/class or EOF
+                j = i + 1
+                while j < len(lines) and (not lines[j] or lines[j][0] in " \t#"):
+                    j += 1
+                results.append(("\n".join(lines[start:j]), start + 1))
+                i = j
+            else:
+                i += 1
+    else:
+        pattern = re.compile(r"^(export\s+)?(async\s+)?function\s+\w+|^\s*(const|let|var)\s+\w+\s*=\s*(async\s+)?\(")
+        for i, line in enumerate(lines):
+            if pattern.match(line):
+                end = min(i + 30, len(lines))
+                results.append(("\n".join(lines[i:end]), i + 1))
+    return results
+
+
+def generate_docstrings(
+    api_key: str, file_path: str, model: str = _MODEL
+) -> list[DocstringResult]:
+    """Generate docstrings for all functions in a file changed in the diff."""
+    from pathlib import Path
+    client = OpenAI(api_key=api_key)
+    code = Path(file_path).read_text(errors="replace")
+    language = _detect_language(file_path)
+    functions = _extract_functions(code, language)
+    if not functions:
+        return []
+    results = []
+    for func_code, _lineno in functions[:10]:  # cap at 10 per file
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=512,
+            messages=[
+                {"role": "system", "content": DOCSTRING_SYSTEM},
+                {"role": "user", "content": DOCSTRING_USER.format(
+                    language=language, code=func_code[:3000]
+                )},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "{}").strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.splitlines()[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.splitlines()[:-1])
+        try:
+            data = json.loads(raw.strip())
+            results.append(DocstringResult(
+                language=data.get("language", language),
+                function_name=data.get("function_name", "unknown"),
+                docstring=data.get("docstring", ""),
+                placement=data.get("placement", "inside"),
+            ))
+        except json.JSONDecodeError:
+            continue
+    return results
+
+
+# ── Branch namer ──────────────────────────────────────────────────────────────
+
+@dataclass
+class BranchSuggestion:
+    suggestions: list[str]
+    recommended: int   # index into suggestions
+
+    @property
+    def best(self) -> str:
+        return self.suggestions[self.recommended]
+
+
+def suggest_branch(api_key: str, task: str, model: str = _MODEL) -> BranchSuggestion:
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=200,
+        messages=[
+            {"role": "system", "content": BRANCH_SYSTEM},
+            {"role": "user", "content": BRANCH_USER.format(task=task)},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    data = json.loads(raw.strip())
+    suggestions = data.get("suggestions", [f"feat/{task[:40].lower().replace(' ', '-')}"])
+    recommended = data.get("recommended", 0)
+    return BranchSuggestion(suggestions=suggestions, recommended=recommended)
+
+
+# ── Code explainer ────────────────────────────────────────────────────────────
+
+def explain_code(
+    api_key: str,
+    file_path: str,
+    selector: str | None = None,
+    model: str = _MODEL,
+) -> str:
+    """Explain a file or specific function in plain English."""
+    from pathlib import Path
+    client = OpenAI(api_key=api_key)
+    code = Path(file_path).read_text(errors="replace")
+
+    # If selector given, try to extract just that function/class
+    if selector:
+        import re
+        pattern = re.compile(
+            rf"^(def |async def |class |\w+ = (async )?function )"
+            rf".*{re.escape(selector)}",
+            re.MULTILINE
+        )
+        m = pattern.search(code)
+        if m:
+            start = m.start()
+            # grab next ~60 lines
+            snippet = "\n".join(code[start:].splitlines()[:60])
+            code = snippet
+
+    if len(code) > _MAX_DIFF_CHARS:
+        code = code[:_MAX_DIFF_CHARS] + "\n\n[truncated]"
+
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=512,
+        messages=[
+            {"role": "system", "content": EXPLAIN_SYSTEM},
+            {"role": "user", "content": EXPLAIN_USER.format(
+                file_path=file_path,
+                selector=f"Function/class: {selector}" if selector else "Whole file",
+                code=code,
+            )},
+        ],
+    )
+    return (resp.choices[0].message.content or "").strip()

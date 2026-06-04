@@ -102,6 +102,9 @@ pr-pilot describe --markdown pr_description.md
 | `pr-pilot todos` | Scan for TODO/FIXME comments and create GitHub issues from them |
 | `pr-pilot commit` | Generate a Conventional Commit message from staged changes |
 | `pr-pilot release` | Full release: changelog + git tag + GitHub release in one command |
+| `pr-pilot docs` | Generate docstrings for functions in changed files |
+| `pr-pilot branch` | Suggest a git branch name from a plain-English task description |
+| `pr-pilot explain` | Explain what a file or function does in plain English |
 
 ## Usage
 
@@ -120,6 +123,26 @@ pr-pilot changelog
 
 # Write directly into CHANGELOG.md
 pr-pilot changelog --output CHANGELOG.md
+```
+
+```bash
+# Generate docstrings for all functions changed vs main
+pr-pilot docs
+
+# Document a specific file
+pr-pilot docs src/auth.py
+
+# Suggest a branch name from a task description
+pr-pilot branch "add rate limiting to upload endpoint"
+
+# Create the branch immediately
+pr-pilot branch "fix login timeout on mobile" --checkout
+
+# Explain what a file does
+pr-pilot explain src/auth.py
+
+# Explain a specific function
+pr-pilot explain src/auth.py --function authenticate
 ```
 
 ```bash
