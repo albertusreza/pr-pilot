@@ -306,3 +306,91 @@ File: {file_path}
 Code:
 {code}
 """
+
+# ── Test case generator ───────────────────────────────────────────────────────
+
+TEST_SYSTEM = """\
+You are an expert software engineer writing unit tests.
+Given a function's source code and its language, generate a complete, runnable
+test file covering the most important cases.
+
+Return a JSON object:
+{
+  "framework": "pytest" | "jest" | "vitest" | "mocha",
+  "filename": "suggested test filename (e.g. test_auth.py)",
+  "code": "the full test file content as a string"
+}
+
+Rules:
+- Python: use pytest, no unittest. Use plain functions, not classes.
+- JS/TS: use Jest or Vitest. Use describe/it blocks.
+- Cover: happy path, edge cases, and at least one error/exception case
+- Mock external dependencies (DB, HTTP, filesystem) — don't make real calls
+- Be specific — test actual values, not just "it should not throw"
+- Return ONLY the JSON object, no markdown fences
+"""
+
+TEST_USER = """\
+Language: {language}
+File: {file_path}
+Function/code to test:
+{code}
+"""
+
+# ── Security scanner ──────────────────────────────────────────────────────────
+
+SECURITY_SYSTEM = """\
+You are a security engineer reviewing a code diff for vulnerabilities.
+Analyze the diff and identify security issues.
+
+Return a JSON object:
+{
+  "issues": [
+    {
+      "severity": "critical" | "high" | "medium" | "low" | "info",
+      "type": "short issue type (e.g. 'Hardcoded secret', 'SQL injection', 'XSS')",
+      "location": "file:line or description of where",
+      "description": "what the issue is and why it matters",
+      "fix": "concrete suggestion to fix it"
+    }
+  ],
+  "summary": "one sentence overall assessment"
+}
+
+Common issues to look for:
+- Hardcoded passwords, API keys, tokens, secrets
+- SQL injection (string concatenation in queries)
+- XSS (unescaped user input in HTML/templates)
+- Path traversal (unsanitized file paths from user input)
+- Insecure deserialization
+- Missing authentication/authorization checks
+- Exposed stack traces or verbose error messages
+- Use of deprecated/unsafe functions (eval, exec, pickle.loads)
+- SSRF (server-side request forgery)
+- Open redirects
+
+If no issues found, return {"issues": [], "summary": "No security issues found."}
+Return ONLY the JSON object, no markdown fences.
+"""
+
+SECURITY_COMMENT_HEADER = "<!-- pr-pilot-security -->"
+
+SECURITY_COMMENT_TEMPLATE = """\
+{header}
+### 🔒 Security scan — PR Narrator
+
+{summary}
+
+{body}
+
+---
+<sub>Scanned by [PR Narrator](https://github.com/albertusreza/pr-pilot) · [pullwise](https://pypi.org/project/pullwise/) on PyPI</sub>
+"""
+
+_SEVERITY_EMOJI = {
+    "critical": "🚨",
+    "high": "🔴",
+    "medium": "🟡",
+    "low": "🔵",
+    "info": "ℹ️",
+}

@@ -16,6 +16,8 @@ from .templates import (
     DOCSTRING_SYSTEM, DOCSTRING_USER,
     BRANCH_SYSTEM, BRANCH_USER,
     EXPLAIN_SYSTEM, EXPLAIN_USER,
+    TEST_SYSTEM, TEST_USER,
+    SECURITY_SYSTEM, SECURITY_COMMENT_HEADER, SECURITY_COMMENT_TEMPLATE, _SEVERITY_EMOJI,
 )
 
 _MAX_DIFF_CHARS = 24_000   # stay well within context limits
@@ -718,3 +720,140 @@ def explain_code(
         ],
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+# ── Test case generator ───────────────────────────────────────────────────────
+
+@dataclass
+class GeneratedTests:
+    framework: str
+    filename: str
+    code: str
+
+
+def generate_tests(
+    api_key: str,
+    file_path: str,
+    selector: str | None = None,
+    model: str = _MODEL,
+) -> GeneratedTests:
+    """Generate unit tests for a file or specific function."""
+    from pathlib import Path
+    client = OpenAI(api_key=api_key)
+    language = _detect_language(file_path)
+    code = Path(file_path).read_text(errors="replace")
+
+    if selector:
+        import re
+        pattern = re.compile(
+            rf"^(def |async def |class |\w+ = (async )?function )"
+            rf".*{re.escape(selector)}",
+            re.MULTILINE,
+        )
+        m = pattern.search(code)
+        if m:
+            code = "\n".join(code[m.start():].splitlines()[:80])
+
+    if len(code) > _MAX_DIFF_CHARS:
+        code = code[:_MAX_DIFF_CHARS] + "\n[truncated]"
+
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=2048,
+        messages=[
+            {"role": "system", "content": TEST_SYSTEM},
+            {"role": "user", "content": TEST_USER.format(
+                language=language, file_path=file_path, code=code
+            )},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    data = json.loads(raw.strip())
+    return GeneratedTests(
+        framework=data.get("framework", "pytest"),
+        filename=data.get("filename", f"test_{file_path.split('/')[-1]}"),
+        code=data.get("code", ""),
+    )
+
+
+# ── Security scanner ──────────────────────────────────────────────────────────
+
+@dataclass
+class SecurityIssue:
+    severity: str
+    type: str
+    location: str
+    description: str
+    fix: str
+
+
+@dataclass
+class SecurityReport:
+    issues: list[SecurityIssue]
+    summary: str
+
+    def to_comment(self) -> str:
+        if not self.issues:
+            body = "✅ No security issues detected in this diff."
+        else:
+            rows = []
+            for issue in sorted(self.issues, key=lambda x: (
+                ["critical", "high", "medium", "low", "info"].index(x.severity)
+            )):
+                emoji = _SEVERITY_EMOJI.get(issue.severity, "•")
+                rows.append(
+                    f"#### {emoji} {issue.severity.upper()} — {issue.type}\n"
+                    f"**Location:** `{issue.location}`\n\n"
+                    f"{issue.description}\n\n"
+                    f"**Fix:** {issue.fix}"
+                )
+            body = "\n\n---\n\n".join(rows)
+        return SECURITY_COMMENT_TEMPLATE.format(
+            header=SECURITY_COMMENT_HEADER,
+            summary=self.summary,
+            body=body,
+        )
+
+    @property
+    def has_critical_or_high(self) -> bool:
+        return any(i.severity in ("critical", "high") for i in self.issues)
+
+
+def scan_security(
+    api_key: str,
+    base: str = "main",
+    model: str = _MODEL,
+) -> SecurityReport:
+    client = OpenAI(api_key=api_key)
+    diff = get_diff(base)
+    if not diff:
+        return SecurityReport(issues=[], summary="No diff to scan.")
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=2048,
+        messages=[
+            {"role": "system", "content": SECURITY_SYSTEM},
+            {"role": "user", "content": f"Diff to review:\n\n{diff}"},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    data = json.loads(raw.strip())
+    issues = [
+        SecurityIssue(
+            severity=i.get("severity", "info"),
+            type=i.get("type", "Unknown"),
+            location=i.get("location", "unknown"),
+            description=i.get("description", ""),
+            fix=i.get("fix", ""),
+        )
+        for i in data.get("issues", [])
+    ]
+    return SecurityReport(issues=issues, summary=data.get("summary", ""))

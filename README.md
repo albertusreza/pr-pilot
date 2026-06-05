@@ -105,6 +105,8 @@ pr-pilot describe --markdown pr_description.md
 | `pr-pilot docs` | Generate docstrings for functions in changed files |
 | `pr-pilot branch` | Suggest a git branch name from a plain-English task description |
 | `pr-pilot explain` | Explain what a file or function does in plain English |
+| `pr-pilot test` | Generate unit tests for a file or function |
+| `pr-pilot security` | Scan the diff for security vulnerabilities, post as a PR comment |
 
 ## Usage
 
@@ -123,6 +125,20 @@ pr-pilot changelog
 
 # Write directly into CHANGELOG.md
 pr-pilot changelog --output CHANGELOG.md
+```
+
+```bash
+# Generate tests for a whole file
+pr-pilot test src/auth.py
+
+# Generate tests for one function and write to file
+pr-pilot test src/auth.py --function authenticate --write
+
+# Scan the diff for security vulnerabilities
+pr-pilot security --base main
+
+# Scan and post the report as a PR comment (exits 1 if critical/high found)
+pr-pilot security --post --repo owner/repo --pr 42
 ```
 
 ```bash

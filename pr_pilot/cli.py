@@ -8,6 +8,7 @@ from .analyzer import (
     generate_changelog, suggest_reviewers, generate_standup, create_issues_from_todos,
     generate_commit_message, run_release,
     generate_docstrings, suggest_branch, explain_code,
+    generate_tests, scan_security,
 )
 
 _RESET = "\033[0m"
@@ -168,6 +169,65 @@ def cmd_release(args: argparse.Namespace) -> None:
         print(f"  {_GREEN}✓{_RESET} Committed and tagged {release.tag}")
         print(f"  {_GREEN}✓{_RESET} GitHub release created")
     print()
+
+
+def cmd_test(args: argparse.Namespace) -> None:
+    import os as _os
+    if not _os.path.exists(args.file):
+        print(f"pr-pilot test: file not found: {args.file}", file=sys.stderr)
+        sys.exit(1)
+    selector_label = f" → {args.function}" if args.function else ""
+    print(f"\n  {_DIM}Generating tests for {args.file}{selector_label}...{_RESET}\n")
+    result = generate_tests(_key(), args.file, selector=args.function, model=args.model)
+    print(f"  {_BOLD}Framework:{_RESET} {result.framework}  "
+          f"{_BOLD}Output file:{_RESET} {_CYAN}{result.filename}{_RESET}\n")
+    print(result.code)
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(result.code)
+        print(f"\n  {_GREEN}✓{_RESET} Written to {args.output}")
+    elif args.write:
+        with open(result.filename, "w") as f:
+            f.write(result.code)
+        print(f"\n  {_GREEN}✓{_RESET} Written to {result.filename}")
+    print()
+
+
+def cmd_security(args: argparse.Namespace) -> None:
+    from .templates import SECURITY_COMMENT_HEADER
+    print(f"\n  {_DIM}Scanning diff against '{args.base}' for security issues...{_RESET}\n")
+    report = scan_security(_key(), base=args.base, model=args.model)
+
+    if not report.issues:
+        print(f"  {_GREEN}✓{_RESET} {report.summary}\n")
+        return
+
+    _SEV_COLOR = {"critical": "\033[35m", "high": _RED, "medium": _YELLOW,
+                  "low": _CYAN, "info": _DIM}
+    print(f"  {_BOLD}{len(report.issues)} issue(s) found{_RESET} — {report.summary}\n")
+    for issue in sorted(report.issues,
+                        key=lambda x: ["critical","high","medium","low","info"].index(x.severity)):
+        color = _SEV_COLOR.get(issue.severity, "")
+        print(f"  {color}{_BOLD}[{issue.severity.upper()}]{_RESET} {issue.type}")
+        print(f"  {_DIM}{issue.location}{_RESET}")
+        print(f"  {issue.description}")
+        print(f"  {_GREEN}Fix:{_RESET} {issue.fix}\n")
+
+    if report.has_critical_or_high and not args.no_fail:
+        print(f"  {_RED}Critical/high severity issues found. Use --no-fail to suppress exit code 1.{_RESET}")
+
+    if args.post:
+        from .github_client import upsert_comment
+        repo   = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+        pr_num = args.pr   or int(os.environ.get("PR_NUMBER", "0"))
+        if not repo or not pr_num:
+            print("  --post requires --repo and --pr (or env vars)", file=sys.stderr)
+            sys.exit(1)
+        url = upsert_comment(repo, pr_num, report.to_comment(), SECURITY_COMMENT_HEADER)
+        print(f"  {_GREEN}✓{_RESET} Security report posted: {url}")
+    print()
+    if report.has_critical_or_high and not args.no_fail:
+        sys.exit(1)
 
 
 def cmd_docs(args: argparse.Namespace) -> None:
@@ -384,6 +444,26 @@ def main() -> None:
     p_rev.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
     p_rev.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
     p_rev.set_defaults(func=cmd_review)
+
+    # --- test ---
+    p_test = sub.add_parser("test", help="Generate unit tests for a file or function")
+    p_test.add_argument("file", help="Source file to generate tests for")
+    p_test.add_argument("--function", "-f", default=None, help="Specific function to test")
+    p_test.add_argument("--model", default="gpt-4o")
+    p_test.add_argument("--output", default=None, metavar="FILE", help="Write tests to FILE")
+    p_test.add_argument("--write", action="store_true", help="Write to suggested filename")
+    p_test.set_defaults(func=cmd_test)
+
+    # --- security ---
+    p_sec = sub.add_parser("security", help="Scan the diff for security vulnerabilities")
+    p_sec.add_argument("--base", default="main")
+    p_sec.add_argument("--model", default="gpt-4o")
+    p_sec.add_argument("--post", action="store_true", help="Post report as a GitHub PR comment")
+    p_sec.add_argument("--repo", default=None)
+    p_sec.add_argument("--pr", type=int, default=None)
+    p_sec.add_argument("--no-fail", action="store_true",
+                       help="Don't exit 1 on critical/high findings (useful in CI)")
+    p_sec.set_defaults(func=cmd_security)
 
     # --- docs ---
     p_docs = sub.add_parser("docs", help="Generate docstrings for functions in changed files")

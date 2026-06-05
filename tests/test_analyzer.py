@@ -9,8 +9,10 @@ from pr_pilot.analyzer import (
     generate_commit_message, CommitMessage, run_release,
     generate_docstrings, suggest_branch, explain_code,
     _extract_functions, _detect_language,
+    generate_tests, GeneratedTests,
+    scan_security, SecurityReport, SecurityIssue,
 )
-from pr_pilot.templates import REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER
+from pr_pilot.templates import REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER, SECURITY_COMMENT_HEADER
 
 
 def _mock_openai_response(content: str) -> MagicMock:
@@ -413,3 +415,98 @@ def test_explain_code_with_selector(tmp_path):
             _mock_openai_response("The add function takes two numbers and returns their sum.")
         result = explain_code("fake-key", str(py_file), selector="add")
     assert "add" in result.lower() or "sum" in result.lower()
+
+
+# ── Test case generator tests ─────────────────────────────────────────────────
+
+def test_generate_tests_python(tmp_path):
+    py_file = tmp_path / "math_utils.py"
+    py_file.write_text("def divide(a, b):\n    if b == 0:\n        raise ValueError('zero')\n    return a / b\n")
+    payload = {
+        "framework": "pytest",
+        "filename": "test_math_utils.py",
+        "code": "import pytest\nfrom math_utils import divide\n\ndef test_divide_basic():\n    assert divide(10, 2) == 5.0\n\ndef test_divide_by_zero():\n    with pytest.raises(ValueError):\n        divide(1, 0)\n",
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        result = generate_tests("fake-key", str(py_file))
+    assert result.framework == "pytest"
+    assert result.filename == "test_math_utils.py"
+    assert "def test_divide_basic" in result.code
+    assert "pytest.raises" in result.code
+
+
+def test_generate_tests_strips_markdown_fence(tmp_path):
+    py_file = tmp_path / "utils.py"
+    py_file.write_text("def add(a, b): return a + b\n")
+    payload = {"framework": "pytest", "filename": "test_utils.py", "code": "def test_add(): assert add(1,2)==3"}
+    raw = f"```json\n{json.dumps(payload)}\n```"
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(raw)
+        result = generate_tests("fake-key", str(py_file))
+    assert result.framework == "pytest"
+
+
+# ── Security scanner tests ────────────────────────────────────────────────────
+
+@patch("pr_pilot.analyzer.get_diff", return_value='+ password = "hunter2"\n+ query = "SELECT * FROM users WHERE id=" + user_id')
+def test_scan_security_finds_issues(mock_diff):
+    payload = {
+        "issues": [
+            {"severity": "critical", "type": "Hardcoded secret",
+             "location": "config.py:1", "description": "Password hardcoded in source.",
+             "fix": "Move to environment variable."},
+            {"severity": "high", "type": "SQL injection",
+             "location": "db.py:2", "description": "User input concatenated into query.",
+             "fix": "Use parameterized queries."},
+        ],
+        "summary": "2 critical issues found.",
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        report = scan_security("fake-key")
+    assert len(report.issues) == 2
+    assert report.has_critical_or_high is True
+    assert report.issues[0].severity == "critical"
+    assert report.issues[1].type == "SQL injection"
+
+
+@patch("pr_pilot.analyzer.get_diff", return_value="+ x = 1  # simple change")
+def test_scan_security_clean_diff(mock_diff):
+    payload = {"issues": [], "summary": "No security issues found."}
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        report = scan_security("fake-key")
+    assert report.issues == []
+    assert report.has_critical_or_high is False
+
+
+def test_security_report_to_comment_clean():
+    report = SecurityReport(issues=[], summary="All clear.")
+    comment = report.to_comment()
+    assert SECURITY_COMMENT_HEADER in comment
+    assert "No security issues detected" in comment
+
+
+def test_security_report_to_comment_with_issues():
+    report = SecurityReport(
+        issues=[SecurityIssue(
+            severity="high", type="SQL injection",
+            location="db.py:42", description="Raw SQL.", fix="Use ORM."
+        )],
+        summary="1 issue found."
+    )
+    comment = report.to_comment()
+    assert "SQL injection" in comment
+    assert "HIGH" in comment
+    assert "db.py:42" in comment
+
+
+@patch("pr_pilot.analyzer.get_diff", return_value="")
+def test_scan_security_no_diff(mock_diff):
+    report = scan_security("fake-key")
+    assert report.summary == "No diff to scan."
