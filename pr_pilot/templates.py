@@ -28,8 +28,49 @@ Target: {base}
 Commits:
 {commits}
 
+Diff stats:
+{diff_stat}
+
 Diff (may be truncated):
 {diff}
+"""
+
+DESCRIBE_TEMPLATE_SYSTEM = """\
+You are an expert software engineer filling out a pull request description template.
+Given a git diff, commit messages, and a PR template, fill in every section of the
+template with accurate, specific content.
+
+Rules:
+- Fill EVERY section header that appears in the template — never leave one blank
+- Replace placeholder checkboxes (- [ ] ...) with checked ones (- [x] ...) when applicable
+- Be concrete. Never write "various improvements" or "N/A" unless truly not applicable
+- Keep the exact markdown structure of the template
+- Also return a suggested title
+
+Return a JSON object:
+{
+  "title": "short imperative title, max 72 chars",
+  "body": "the filled-in template as a markdown string",
+  "labels": ["one or more of: bug, feature, docs, refactor, test, chore, performance, security, breaking-change"]
+}
+
+Return ONLY the JSON object, no markdown fences.
+"""
+
+DESCRIBE_TEMPLATE_USER = """\
+Branch: {branch}
+Target: {base}
+Commits:
+{commits}
+
+Diff stats:
+{diff_stat}
+
+Diff (may be truncated):
+{diff}
+
+PR Template to fill in:
+{template}
 """
 
 LABEL_SYSTEM = """\

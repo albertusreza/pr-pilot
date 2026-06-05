@@ -28,8 +28,13 @@ def _key() -> str:
 
 
 def cmd_describe(args: argparse.Namespace) -> None:
-    print(f"\n  {_DIM}Analyzing diff against '{args.base}'...{_RESET}\n")
-    desc = describe_pr(_key(), base=args.base, model=args.model)
+    from .analyzer import _find_pr_template
+    template = _find_pr_template() if not args.no_template else None
+    if template:
+        print(f"\n  {_DIM}PR template detected — filling it in against '{args.base}'...{_RESET}\n")
+    else:
+        print(f"\n  {_DIM}Analyzing diff against '{args.base}'...{_RESET}\n")
+    desc = describe_pr(_key(), base=args.base, model=args.model, use_template=not args.no_template)
 
     print(f"{_BOLD}Title:{_RESET}  {desc.title}\n")
     print(f"{_BOLD}Summary:{_RESET}")
@@ -409,7 +414,7 @@ def cmd_action(args: argparse.Namespace) -> None:
     print(f"  PR #{pr_num}: {pr.title}")
     print(f"  Base: {pr.base}  Head: {pr.head}")
 
-    desc = describe_pr(_key(), base=pr.base, model=args.model)
+    desc = describe_pr(_key(), base=pr.base, model=args.model, use_template=True)
     body = desc.to_markdown()
 
     # Don't overwrite if user already wrote a substantial description
@@ -437,6 +442,8 @@ def main() -> None:
     p_desc.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
     p_desc.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
     p_desc.add_argument("--markdown", metavar="FILE", help="Write description as markdown to FILE")
+    p_desc.add_argument("--no-template", action="store_true",
+                        help="Ignore .github/pull_request_template.md even if present")
     p_desc.set_defaults(func=cmd_describe)
 
     # --- review ---

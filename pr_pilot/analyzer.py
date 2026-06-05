@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from openai import OpenAI
 
 from .templates import (
-    DESCRIBE_SYSTEM, DESCRIBE_USER, LABEL_SYSTEM, REVIEW_SYSTEM,
+    DESCRIBE_SYSTEM, DESCRIBE_USER,
+    DESCRIBE_TEMPLATE_SYSTEM, DESCRIBE_TEMPLATE_USER,
+    LABEL_SYSTEM, REVIEW_SYSTEM,
     CHANGELOG_SYSTEM, CHANGELOG_USER, REVIEW_COMMENT_HEADER, REVIEW_COMMENT_TEMPLATE,
     REVIEWER_SYSTEM, REVIEWER_USER, REVIEWER_COMMENT_HEADER, REVIEWER_COMMENT_TEMPLATE,
     STANDUP_SYSTEM, STANDUP_USER,
@@ -33,8 +35,12 @@ class PRDescription:
     breaking_notes: str | None
     test_plan: str
     labels: list[str]
+    _raw_body: str | None = field(default=None, repr=False)
 
     def to_markdown(self) -> str:
+        # If we have a pre-rendered template body, use it directly
+        if self._raw_body:
+            return self._raw_body
         lines = [
             f"## Summary\n{self.summary}\n",
             "## Changes",
@@ -54,9 +60,29 @@ def _git(*args: str) -> str:
 
 def get_diff(base: str = "main") -> str:
     diff = _git("diff", f"{base}...HEAD")
-    if len(diff) > _MAX_DIFF_CHARS:
-        diff = diff[:_MAX_DIFF_CHARS] + "\n\n[diff truncated — showing first 24k chars]"
-    return diff
+    if len(diff) <= _MAX_DIFF_CHARS:
+        return diff
+    # Smart truncation: show full diff per file, drop files once budget runs out
+    files = _git("diff", f"{base}...HEAD", "--name-only").splitlines()
+    sections = []
+    budget = _MAX_DIFF_CHARS - 200
+    for f in files:
+        file_diff = _git("diff", f"{base}...HEAD", "--", f)
+        if len(file_diff) > 8_000:
+            # Trim very large single-file diffs to first 8k
+            file_diff = file_diff[:8_000] + "\n... [file diff truncated]"
+        if budget - len(file_diff) < 0:
+            remaining = len(files) - len(sections)
+            sections.append(f"\n[{remaining} more file(s) omitted — diff too large]")
+            break
+        sections.append(file_diff)
+        budget -= len(file_diff)
+    return "\n".join(sections)
+
+
+def get_diff_stat(base: str = "main") -> str:
+    """Return human-readable diff stats (files changed, insertions, deletions)."""
+    return _git("diff", f"{base}...HEAD", "--stat")
 
 
 def get_commits(base: str = "main") -> str:
@@ -67,34 +93,92 @@ def get_branch() -> str:
     return _git("rev-parse", "--abbrev-ref", "HEAD")
 
 
-def describe_pr(api_key: str, base: str = "main", model: str = _MODEL) -> PRDescription:
+def _find_pr_template() -> str | None:
+    """Search for a PR template in common locations. Returns content or None."""
+    from pathlib import Path
+    candidates = [
+        ".github/pull_request_template.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/PULL_REQUEST_TEMPLATE/default.md",
+        "docs/pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+    ]
+    for path in candidates:
+        p = Path(path)
+        if p.exists():
+            content = p.read_text(errors="replace").strip()
+            if content:
+                return content
+    return None
+
+
+def _parse_json_response(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.splitlines()[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.splitlines()[:-1])
+    return json.loads(raw.strip())
+
+
+def describe_pr(
+    api_key: str,
+    base: str = "main",
+    model: str = _MODEL,
+    use_template: bool = True,
+) -> PRDescription:
     client = OpenAI(api_key=api_key)
     diff = get_diff(base)
+    diff_stat = get_diff_stat(base)
     commits = get_commits(base)
     branch = get_branch()
 
     if not diff and not commits:
         raise ValueError(f"No changes found between '{branch}' and '{base}'")
 
-    user_msg = DESCRIBE_USER.format(
-        branch=branch, base=base, commits=commits or "(none)", diff=diff or "(empty)"
-    )
+    template = _find_pr_template() if use_template else None
+
+    if template:
+        user_msg = DESCRIBE_TEMPLATE_USER.format(
+            branch=branch, base=base,
+            commits=commits or "(none)",
+            diff_stat=diff_stat or "(no stats)",
+            diff=diff or "(empty)",
+            template=template,
+        )
+        system = DESCRIBE_TEMPLATE_SYSTEM
+    else:
+        user_msg = DESCRIBE_USER.format(
+            branch=branch, base=base,
+            commits=commits or "(none)",
+            diff_stat=diff_stat or "(no stats)",
+            diff=diff or "(empty)",
+        )
+        system = DESCRIBE_SYSTEM
+
     resp = client.chat.completions.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=1536,
         messages=[
-            {"role": "system", "content": DESCRIBE_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ],
     )
-    raw = resp.choices[0].message.content or "{}"
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = "\n".join(raw.splitlines()[1:])
-    if raw.endswith("```"):
-        raw = "\n".join(raw.splitlines()[:-1])
+    data = _parse_json_response(resp.choices[0].message.content or "{}")
 
-    data = json.loads(raw.strip())
+    # Template mode returns a pre-rendered body; store it for to_markdown()
+    if template and "body" in data:
+        return PRDescription(
+            title=data.get("title", branch),
+            summary=data.get("body", ""),   # body goes into summary slot
+            changes=[],                      # already embedded in body
+            breaking=False,
+            breaking_notes=None,
+            test_plan="",
+            labels=data.get("labels", ["feature"]),
+            _raw_body=data.get("body"),      # type: ignore[call-arg]
+        )
+
     return PRDescription(
         title=data.get("title", branch),
         summary=data.get("summary", ""),

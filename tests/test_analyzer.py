@@ -11,8 +11,12 @@ from pr_pilot.analyzer import (
     _extract_functions, _detect_language,
     generate_tests, GeneratedTests,
     scan_security, SecurityReport, SecurityIssue,
+    get_diff, get_diff_stat, _find_pr_template, _parse_json_response,
 )
-from pr_pilot.templates import REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER, SECURITY_COMMENT_HEADER
+from pr_pilot.templates import (
+    REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER, SECURITY_COMMENT_HEADER,
+    DESCRIBE_TEMPLATE_SYSTEM,
+)
 
 
 def _mock_openai_response(content: str) -> MagicMock:
@@ -34,10 +38,12 @@ _SAMPLE_DESC = {
 }
 
 
+@patch("pr_pilot.analyzer._find_pr_template", return_value=None)
+@patch("pr_pilot.analyzer.get_diff_stat", return_value=" theme.css | 10 ++")
 @patch("pr_pilot.analyzer.get_diff", return_value="diff --git a/theme.css ...")
 @patch("pr_pilot.analyzer.get_commits", return_value="abc123 Add dark mode")
 @patch("pr_pilot.analyzer.get_branch", return_value="feat/dark-mode")
-def test_describe_pr_basic(mock_branch, mock_commits, mock_diff):
+def test_describe_pr_basic(mock_branch, mock_commits, mock_diff, mock_stat, mock_tmpl):
     with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
         MockOpenAI.return_value.chat.completions.create.return_value = \
             _mock_openai_response(json.dumps(_SAMPLE_DESC))
@@ -48,10 +54,12 @@ def test_describe_pr_basic(mock_branch, mock_commits, mock_diff):
     assert len(desc.changes) == 3
 
 
+@patch("pr_pilot.analyzer._find_pr_template", return_value=None)
+@patch("pr_pilot.analyzer.get_diff_stat", return_value=" theme.css | 10 ++")
 @patch("pr_pilot.analyzer.get_diff", return_value="diff --git a/theme.css ...")
 @patch("pr_pilot.analyzer.get_commits", return_value="abc123 Add dark mode")
 @patch("pr_pilot.analyzer.get_branch", return_value="feat/dark-mode")
-def test_describe_pr_strips_markdown_fence(mock_branch, mock_commits, mock_diff):
+def test_describe_pr_strips_markdown_fence(mock_branch, mock_commits, mock_diff, mock_stat, mock_tmpl):
     raw = f"```json\n{json.dumps(_SAMPLE_DESC)}\n```"
     with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
         MockOpenAI.return_value.chat.completions.create.return_value = \
@@ -67,6 +75,97 @@ def test_describe_pr_to_markdown():
     assert "## Changes" in md
     assert "## Test Plan" in md
     assert "ThemeToggle" in md
+
+
+def test_describe_pr_to_markdown_uses_raw_body():
+    """When _raw_body is set (template mode), to_markdown returns it verbatim."""
+    desc = PRDescription(**{**_SAMPLE_DESC, "_raw_body": "## My Template\nFilled in."})
+    assert desc.to_markdown() == "## My Template\nFilled in."
+
+
+# ── Smart diff tests ──────────────────────────────────────────────────────────
+
+def test_get_diff_short_returns_as_is():
+    with patch("pr_pilot.analyzer._git", return_value="small diff"):
+        result = get_diff("main")
+    assert result == "small diff"
+
+
+def test_get_diff_large_summarises_by_file():
+    big_diff = "x" * 30_000
+    file_list = "auth.py\nutils.py"
+    file_diffs = {"auth.py": "a" * 500, "utils.py": "b" * 500}
+
+    def fake_git(*args):
+        if "--name-only" in args:
+            return file_list
+        if "--" in args:
+            fname = args[-1]
+            return file_diffs.get(fname, "")
+        return big_diff
+
+    with patch("pr_pilot.analyzer._git", side_effect=fake_git):
+        result = get_diff("main")
+    assert "aaa" in result
+    assert "bbb" in result
+    # Should NOT be the raw big_diff
+    assert len(result) < 30_000
+
+
+# ── PR template detection tests ───────────────────────────────────────────────
+
+def test_find_pr_template_returns_none_when_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert _find_pr_template() is None
+
+
+def test_find_pr_template_detects_github_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gh = tmp_path / ".github"
+    gh.mkdir()
+    (gh / "pull_request_template.md").write_text("## Summary\n\n## Changes\n")
+    result = _find_pr_template()
+    assert result is not None
+    assert "## Summary" in result
+
+
+@patch("pr_pilot.analyzer._find_pr_template",
+       return_value="## Summary\n\n## Changes\n\n## Test Plan\n")
+@patch("pr_pilot.analyzer.get_diff_stat", return_value=" auth.py | 5 +")
+@patch("pr_pilot.analyzer.get_diff", return_value="+ def login(): pass")
+@patch("pr_pilot.analyzer.get_commits", return_value="abc Add login")
+@patch("pr_pilot.analyzer.get_branch", return_value="feat/login")
+def test_describe_pr_uses_template(mock_branch, mock_commits, mock_diff, mock_stat, mock_tmpl):
+    payload = {
+        "title": "Add login endpoint",
+        "body": "## Summary\nAdds a login endpoint.\n\n## Changes\n- Add login func\n\n## Test Plan\nRun tests.",
+        "labels": ["feature"],
+    }
+    with patch("pr_pilot.analyzer.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = \
+            _mock_openai_response(json.dumps(payload))
+        desc = describe_pr("fake-key", use_template=True)
+    assert desc.title == "Add login endpoint"
+    assert desc._raw_body is not None
+    assert "## Summary" in desc.to_markdown()
+    # Verify TEMPLATE system prompt was used
+    call_args = MockOpenAI.return_value.chat.completions.create.call_args
+    system_msg = call_args[1]["messages"][0]["content"]
+    assert "template" in system_msg.lower()
+
+
+# ── _parse_json_response tests ────────────────────────────────────────────────
+
+def test_parse_json_response_plain():
+    assert _parse_json_response('{"a": 1}') == {"a": 1}
+
+
+def test_parse_json_response_fenced():
+    assert _parse_json_response('```json\n{"a": 1}\n```') == {"a": 1}
+
+
+def test_parse_json_response_fenced_no_lang():
+    assert _parse_json_response('```\n{"a": 1}\n```') == {"a": 1}
 
 
 def test_suggest_labels():
