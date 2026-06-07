@@ -510,17 +510,52 @@ def _get_staged_diff() -> str:
     return diff
 
 
+def _detect_commit_scope() -> str:
+    """Infer a conventional-commit scope from staged file paths.
+
+    Examples:
+      auth/login.py, auth/signup.py  → "auth"
+      src/api/routes.py              → "api"
+      tests/test_utils.py            → "tests"
+
+    Returns an empty string if no clear scope is found.
+    """
+    from collections import Counter
+    files = _git("diff", "--cached", "--name-only").splitlines()
+    if not files:
+        return ""
+    # Top-level dirs that are containers, not scopes
+    _SKIP = {"src", "lib", "app", "pkg", "packages", "source", ""}
+    candidates: list[str] = []
+    for f in files:
+        parts = f.replace("\\", "/").split("/")
+        for part in parts[:-1]:          # skip the filename itself
+            token = part.lower()
+            if token not in _SKIP:
+                candidates.append(token)
+                break                    # only take the first meaningful dir
+    if not candidates:
+        return ""
+    top, count = Counter(candidates).most_common(1)[0]
+    # Only use as scope if it covers at least half the staged files
+    # Require strict majority (>50%) so mixed-dir diffs don't get a spurious scope
+    if count * 2 > len(files):
+        return top
+    return ""
+
+
 def generate_commit_message(api_key: str, model: str = _MODEL) -> CommitMessage:
     client = OpenAI(api_key=api_key)
     diff = _get_staged_diff()
     if not diff:
         raise ValueError("No staged changes found. Use 'git add' first.")
+    scope_hint = _detect_commit_scope() or "none detected"
     resp = client.chat.completions.create(
         model=model,
         max_tokens=512,
         messages=[
             {"role": "system", "content": COMMIT_SYSTEM},
-            {"role": "user", "content": COMMIT_USER.format(diff=diff)},
+            {"role": "user", "content": COMMIT_USER.format(diff=diff, scope_hint=scope_hint)},
         ],
     )
     raw = (resp.choices[0].message.content or "{}").strip()

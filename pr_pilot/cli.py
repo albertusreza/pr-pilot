@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 
+from . import config as _config
 from .analyzer import (
     describe_pr, suggest_labels, review_pr, review_pr_as_comment,
     generate_changelog, suggest_reviewers, generate_standup, create_issues_from_todos,
@@ -19,10 +20,17 @@ _DIM   = "\033[2m"
 _YELLOW = "\033[33m"
 
 
-def _key() -> str:
-    k = os.environ.get("OPENAI_API_KEY", "")
+def _key(args: argparse.Namespace | None = None) -> str:
+    """Return API key with priority: --api-key flag > OPENAI_API_KEY env > ~/.pullwise.toml."""
+    k = (getattr(args, "api_key", None) or "").strip()
     if not k:
-        print("pr-pilot: OPENAI_API_KEY is not set", file=sys.stderr)
+        k = _config.api_key().strip()
+    if not k:
+        print(
+            "pr-pilot: no API key found.\n"
+            "  Set OPENAI_API_KEY, pass --api-key, or add api_key to ~/.pullwise.toml",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return k
 
@@ -34,7 +42,7 @@ def cmd_describe(args: argparse.Namespace) -> None:
         print(f"\n  {_DIM}PR template detected — filling it in against '{args.base}'...{_RESET}\n")
     else:
         print(f"\n  {_DIM}Analyzing diff against '{args.base}'...{_RESET}\n")
-    desc = describe_pr(_key(), base=args.base, model=args.model, use_template=not args.no_template)
+    desc = describe_pr(_key(args), base=args.base, model=args.model, use_template=not args.no_template)
 
     print(f"{_BOLD}Title:{_RESET}  {desc.title}\n")
     print(f"{_BOLD}Summary:{_RESET}")
@@ -58,7 +66,7 @@ def cmd_describe(args: argparse.Namespace) -> None:
 
 def cmd_review(args: argparse.Namespace) -> None:
     print(f"\n  {_DIM}Reviewing diff against '{args.base}'...{_RESET}\n")
-    review = review_pr(_key(), base=args.base, model=args.model)
+    review = review_pr(_key(args), base=args.base, model=args.model)
     print(review)
     print()
 
@@ -76,7 +84,7 @@ def cmd_comment(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print(f"\n  {_DIM}Generating review for PR #{pr_num}...{_RESET}\n")
-    comment_body = review_pr_as_comment(_key(), base=args.base, model=args.model)
+    comment_body = review_pr_as_comment(_key(args), base=args.base, model=args.model)
     url = upsert_comment(repo, pr_num, comment_body, REVIEW_COMMENT_HEADER)
     print(f"  {_GREEN}✓{_RESET} Review posted: {url}\n")
 
@@ -84,7 +92,7 @@ def cmd_comment(args: argparse.Namespace) -> None:
 def cmd_changelog(args: argparse.Namespace) -> None:
     import datetime
     print(f"\n  {_DIM}Generating changelog from commits...{_RESET}\n")
-    entry, new_version = generate_changelog(_key(), model=args.model)
+    entry, new_version = generate_changelog(_key(args), model=args.model)
     today = datetime.date.today().isoformat()
     md = entry.to_markdown(new_version, today)
 
@@ -113,7 +121,7 @@ def cmd_changelog(args: argparse.Namespace) -> None:
 
 def cmd_commit(args: argparse.Namespace) -> None:
     print(f"\n  {_DIM}Analyzing staged changes...{_RESET}\n")
-    msg = generate_commit_message(_key(), model=args.model)
+    msg = generate_commit_message(_key(args), model=args.model)
 
     print(f"{_BOLD}Commit message:{_RESET}\n")
     print(f"  {_GREEN}{msg.subject}{_RESET}")
@@ -156,7 +164,7 @@ def cmd_release(args: argparse.Namespace) -> None:
         print(f"\n  {_DIM}Running full release workflow for {repo}...{_RESET}\n")
 
     release = run_release(
-        _key(),
+        _key(args),
         repo=repo,
         changelog_path=args.changelog,
         model=args.model,
@@ -183,7 +191,7 @@ def cmd_test(args: argparse.Namespace) -> None:
         sys.exit(1)
     selector_label = f" → {args.function}" if args.function else ""
     print(f"\n  {_DIM}Generating tests for {args.file}{selector_label}...{_RESET}\n")
-    result = generate_tests(_key(), args.file, selector=args.function, model=args.model)
+    result = generate_tests(_key(args), args.file, selector=args.function, model=args.model)
     print(f"  {_BOLD}Framework:{_RESET} {result.framework}  "
           f"{_BOLD}Output file:{_RESET} {_CYAN}{result.filename}{_RESET}\n")
     print(result.code)
@@ -201,7 +209,7 @@ def cmd_test(args: argparse.Namespace) -> None:
 def cmd_security(args: argparse.Namespace) -> None:
     from .templates import SECURITY_COMMENT_HEADER
     print(f"\n  {_DIM}Scanning diff against '{args.base}' for security issues...{_RESET}\n")
-    report = scan_security(_key(), base=args.base, model=args.model)
+    report = scan_security(_key(args), base=args.base, model=args.model)
 
     if not report.issues:
         print(f"  {_GREEN}✓{_RESET} {report.summary}\n")
@@ -250,7 +258,7 @@ def cmd_docs(args: argparse.Namespace) -> None:
 
     for file_path in files:
         print(f"\n  {_DIM}Generating docstrings for {file_path}...{_RESET}\n")
-        results = generate_docstrings(_key(), file_path, model=args.model)
+        results = generate_docstrings(_key(args), file_path, model=args.model)
         if not results:
             print(f"  No functions found in {file_path}")
             continue
@@ -272,7 +280,7 @@ def cmd_branch(args: argparse.Namespace) -> None:
         print("pr-pilot branch: provide a task description", file=sys.stderr)
         sys.exit(1)
     print(f"\n  {_DIM}Generating branch names for: \"{task}\"{_RESET}\n")
-    suggestion = suggest_branch(_key(), task=task, model=args.model)
+    suggestion = suggest_branch(_key(args), task=task, model=args.model)
     for i, name in enumerate(suggestion.suggestions):
         marker = f"{_GREEN}★{_RESET}" if i == suggestion.recommended else " "
         print(f"  {marker} {_BOLD}{name}{_RESET}")
@@ -302,7 +310,7 @@ def cmd_explain(args: argparse.Namespace) -> None:
         sys.exit(1)
     selector_label = f" → {args.function}" if args.function else ""
     print(f"\n  {_DIM}Explaining {args.file}{selector_label}...{_RESET}\n")
-    explanation = explain_code(_key(), args.file, selector=args.function, model=args.model)
+    explanation = explain_code(_key(args), args.file, selector=args.function, model=args.model)
     print(explanation)
     print()
 
@@ -311,7 +319,7 @@ def cmd_reviewers(args: argparse.Namespace) -> None:
     from .github_client import upsert_comment
     from .templates import REVIEWER_COMMENT_HEADER
 
-    suggestion = suggest_reviewers(_key(), base=args.base, model=args.model)
+    suggestion = suggest_reviewers(_key(args), base=args.base, model=args.model)
 
     print(f"\n  {_BOLD}Suggested reviewers:{_RESET}")
     for r in suggestion.reviewers:
@@ -337,7 +345,7 @@ def cmd_reviewers(args: argparse.Namespace) -> None:
 
 def cmd_standup(args: argparse.Namespace) -> None:
     print(f"\n  {_DIM}Generating standup from last {args.days} day(s) of commits...{_RESET}\n")
-    update = generate_standup(_key(), days=args.days, model=args.model)
+    update = generate_standup(_key(args), days=args.days, model=args.model)
     print(update)
     if args.copy:
         try:
@@ -353,7 +361,7 @@ def cmd_todos(args: argparse.Namespace) -> None:
     from .github_client import _api
 
     print(f"\n  {_DIM}Scanning for TODO/FIXME comments in {args.path}...{_RESET}\n")
-    issues = create_issues_from_todos(_key(), root=args.path, model=args.model)
+    issues = create_issues_from_todos(_key(args), root=args.path, model=args.model)
 
     if not issues:
         print("  No TODO/FIXME comments found.")
@@ -414,7 +422,7 @@ def cmd_action(args: argparse.Namespace) -> None:
     print(f"  PR #{pr_num}: {pr.title}")
     print(f"  Base: {pr.base}  Head: {pr.head}")
 
-    desc = describe_pr(_key(), base=pr.base, model=args.model, use_template=True)
+    desc = describe_pr(_key(args), base=pr.base, model=args.model, use_template=True)
     body = desc.to_markdown()
 
     # Don't overwrite if user already wrote a substantial description
@@ -431,16 +439,24 @@ def cmd_action(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    _default_model = _config.default_model()
+    _default_base  = _config.default_base()
+
     parser = argparse.ArgumentParser(
         prog="pr-pilot",
         description="AI-powered PR descriptions and labels using OpenAI.",
+    )
+    parser.add_argument(
+        "--api-key", dest="api_key", default="",
+        metavar="KEY",
+        help="OpenAI API key (overrides OPENAI_API_KEY env var and ~/.pullwise.toml)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --- describe ---
     p_desc = sub.add_parser("describe", help="Generate a PR description for the current branch")
-    p_desc.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
-    p_desc.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
+    p_desc.add_argument("--base", default=_default_base, help="Base branch to diff against")
+    p_desc.add_argument("--model", default=_default_model, help="OpenAI model to use")
     p_desc.add_argument("--markdown", metavar="FILE", help="Write description as markdown to FILE")
     p_desc.add_argument("--no-template", action="store_true",
                         help="Ignore .github/pull_request_template.md even if present")
@@ -448,23 +464,23 @@ def main() -> None:
 
     # --- review ---
     p_rev = sub.add_parser("review", help="Get a quick code review of the current branch")
-    p_rev.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
-    p_rev.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
+    p_rev.add_argument("--base", default=_default_base, help="Base branch to diff against")
+    p_rev.add_argument("--model", default=_default_model, help="OpenAI model to use")
     p_rev.set_defaults(func=cmd_review)
 
     # --- test ---
     p_test = sub.add_parser("test", help="Generate unit tests for a file or function")
     p_test.add_argument("file", help="Source file to generate tests for")
     p_test.add_argument("--function", "-f", default=None, help="Specific function to test")
-    p_test.add_argument("--model", default="gpt-4o")
+    p_test.add_argument("--model", default=_default_model)
     p_test.add_argument("--output", default=None, metavar="FILE", help="Write tests to FILE")
     p_test.add_argument("--write", action="store_true", help="Write to suggested filename")
     p_test.set_defaults(func=cmd_test)
 
     # --- security ---
     p_sec = sub.add_parser("security", help="Scan the diff for security vulnerabilities")
-    p_sec.add_argument("--base", default="main")
-    p_sec.add_argument("--model", default="gpt-4o")
+    p_sec.add_argument("--base", default=_default_base)
+    p_sec.add_argument("--model", default=_default_model)
     p_sec.add_argument("--post", action="store_true", help="Post report as a GitHub PR comment")
     p_sec.add_argument("--repo", default=None)
     p_sec.add_argument("--pr", type=int, default=None)
@@ -475,14 +491,14 @@ def main() -> None:
     # --- docs ---
     p_docs = sub.add_parser("docs", help="Generate docstrings for functions in changed files")
     p_docs.add_argument("files", nargs="*", help="Files to document (default: changed files vs base)")
-    p_docs.add_argument("--base", default="main")
-    p_docs.add_argument("--model", default="gpt-4o")
+    p_docs.add_argument("--base", default=_default_base)
+    p_docs.add_argument("--model", default=_default_model)
     p_docs.set_defaults(func=cmd_docs)
 
     # --- branch ---
     p_branch = sub.add_parser("branch", help="Suggest a git branch name from a task description")
     p_branch.add_argument("task", nargs="+", help="Plain-English task description")
-    p_branch.add_argument("--model", default="gpt-4o")
+    p_branch.add_argument("--model", default=_default_model)
     p_branch.add_argument("--checkout", action="store_true", help="Run git checkout -b with the best suggestion")
     p_branch.add_argument("--copy", action="store_true", help="Copy best suggestion to clipboard (macOS)")
     p_branch.set_defaults(func=cmd_branch)
@@ -491,12 +507,12 @@ def main() -> None:
     p_explain = sub.add_parser("explain", help="Explain what a file or function does in plain English")
     p_explain.add_argument("file", help="File to explain")
     p_explain.add_argument("--function", "-f", default=None, help="Specific function or class to explain")
-    p_explain.add_argument("--model", default="gpt-4o")
+    p_explain.add_argument("--model", default=_default_model)
     p_explain.set_defaults(func=cmd_explain)
 
     # --- commit ---
     p_commit = sub.add_parser("commit", help="Generate a conventional commit message from staged changes")
-    p_commit.add_argument("--model", default="gpt-4o")
+    p_commit.add_argument("--model", default=_default_model)
     p_commit.add_argument("--commit", action="store_true", help="Run git commit with the generated message")
     p_commit.add_argument("--copy", action="store_true", help="Copy message to clipboard (macOS)")
     p_commit.set_defaults(func=cmd_commit)
@@ -504,7 +520,7 @@ def main() -> None:
     # --- release ---
     p_release = sub.add_parser("release", help="Full release: changelog + git tag + GitHub release")
     p_release.add_argument("--repo", default=None, help="GitHub repo slug (owner/repo)")
-    p_release.add_argument("--model", default="gpt-4o")
+    p_release.add_argument("--model", default=_default_model)
     p_release.add_argument("--changelog", default="CHANGELOG.md", metavar="FILE",
                            help="Path to CHANGELOG.md (default: CHANGELOG.md)")
     p_release.add_argument("--dry-run", action="store_true",
@@ -513,8 +529,8 @@ def main() -> None:
 
     # --- reviewers ---
     p_rev2 = sub.add_parser("reviewers", help="Suggest reviewers based on git blame of changed files")
-    p_rev2.add_argument("--base", default="main")
-    p_rev2.add_argument("--model", default="gpt-4o")
+    p_rev2.add_argument("--base", default=_default_base)
+    p_rev2.add_argument("--model", default=_default_model)
     p_rev2.add_argument("--post", action="store_true", help="Post suggestion as a PR comment")
     p_rev2.add_argument("--assign", action="store_true", help="Also assign the reviewers on GitHub")
     p_rev2.add_argument("--repo", default=None)
@@ -524,36 +540,36 @@ def main() -> None:
     # --- standup ---
     p_stand = sub.add_parser("standup", help="Generate a daily standup from recent commits")
     p_stand.add_argument("--days", type=int, default=1, help="How many days back to look (default: 1)")
-    p_stand.add_argument("--model", default="gpt-4o")
+    p_stand.add_argument("--model", default=_default_model)
     p_stand.add_argument("--copy", action="store_true", help="Copy output to clipboard (macOS)")
     p_stand.set_defaults(func=cmd_standup)
 
     # --- todos ---
     p_todos = sub.add_parser("todos", help="Scan for TODO/FIXME comments and create GitHub issues")
     p_todos.add_argument("path", nargs="?", default=".", help="Directory to scan (default: .)")
-    p_todos.add_argument("--model", default="gpt-4o")
+    p_todos.add_argument("--model", default=_default_model)
     p_todos.add_argument("--create", action="store_true", help="Create GitHub issues from found TODOs")
     p_todos.add_argument("--repo", default=None, help="GitHub repo slug (required with --create)")
     p_todos.set_defaults(func=cmd_todos)
 
     # --- comment ---
     p_com = sub.add_parser("comment", help="Post an AI review as a GitHub PR comment")
-    p_com.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
-    p_com.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
+    p_com.add_argument("--base", default=_default_base, help="Base branch to diff against")
+    p_com.add_argument("--model", default=_default_model, help="OpenAI model to use")
     p_com.add_argument("--repo", default=None, help="GitHub repo slug (e.g. owner/repo)")
     p_com.add_argument("--pr", type=int, default=None, help="PR number")
     p_com.set_defaults(func=cmd_comment)
 
     # --- changelog ---
     p_cl = sub.add_parser("changelog", help="Generate a CHANGELOG.md entry from commits since last tag")
-    p_cl.add_argument("--model", default="gpt-4o", help="OpenAI model to use")
+    p_cl.add_argument("--model", default=_default_model, help="OpenAI model to use")
     p_cl.add_argument("--output", default=None, metavar="FILE",
                       help="Prepend entry to FILE (e.g. CHANGELOG.md). Prints to stdout if omitted.")
     p_cl.set_defaults(func=cmd_changelog)
 
     # --- action (internal, called by entrypoint.sh) ---
     p_act = sub.add_parser("action", help="Run as a GitHub Action (internal)")
-    p_act.add_argument("--model", default="gpt-4o")
+    p_act.add_argument("--model", default=_default_model)
     p_act.set_defaults(func=cmd_action)
 
     args = parser.parse_args()

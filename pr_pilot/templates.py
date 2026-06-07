@@ -244,6 +244,8 @@ Rules:
 COMMIT_USER = """\
 Staged diff:
 {diff}
+
+Scope hint (inferred from changed file paths — use as the (scope) if relevant, or ignore if not): {scope_hint}
 """
 
 # ── Full release workflow ─────────────────────────────────────────────────────
