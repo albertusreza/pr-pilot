@@ -6,6 +6,7 @@ import sys
 from . import config as _config
 from .analyzer import (
     describe_pr, suggest_labels, review_pr, review_pr_as_comment,
+    review_pr_inline,
     generate_changelog, suggest_reviewers, generate_standup, create_issues_from_todos,
     generate_commit_message, run_release,
     generate_docstrings, suggest_branch, explain_code,
@@ -65,17 +66,28 @@ def cmd_describe(args: argparse.Namespace) -> None:
 
 
 def cmd_review(args: argparse.Namespace) -> None:
-    print(f"\n  {_DIM}Reviewing diff against '{args.base}'...{_RESET}\n")
-    review = review_pr(_key(args), base=args.base, model=args.model)
-    print(review)
+    if args.inline:
+        print(f"\n  {_DIM}Running inline review against '{args.base}'...{_RESET}\n")
+        result = review_pr_inline(_key(args), base=args.base, model=args.model)
+        _SEV_COLOR = {"must-fix": _RED, "suggestion": _YELLOW, "nit": _DIM}
+        print(f"{_BOLD}Summary:{_RESET}\n  {result.summary}\n")
+        if result.comments:
+            for c in result.comments:
+                color = _SEV_COLOR.get(c.severity, "")
+                print(f"  {color}{_BOLD}[{c.severity.upper()}]{_RESET}  "
+                      f"{_CYAN}{c.path}{_RESET}:{_BOLD}{c.line}{_RESET}")
+                print(f"  {c.body}\n")
+        else:
+            print(f"  {_GREEN}✓{_RESET} No issues found.\n")
+    else:
+        print(f"\n  {_DIM}Reviewing diff against '{args.base}'...{_RESET}\n")
+        review = review_pr(_key(args), base=args.base, model=args.model)
+        print(review)
     print()
 
 
 def cmd_comment(args: argparse.Namespace) -> None:
-    """Post AI review as a PR comment on GitHub."""
-    from .github_client import upsert_comment
-    from .templates import REVIEW_COMMENT_HEADER
-
+    """Post AI review as a PR comment (or inline review) on GitHub."""
     repo   = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
     pr_num = args.pr or int(os.environ.get("PR_NUMBER", "0"))
 
@@ -83,10 +95,37 @@ def cmd_comment(args: argparse.Namespace) -> None:
         print("pr-pilot comment: --repo and --pr are required (or set GITHUB_REPOSITORY / PR_NUMBER)", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\n  {_DIM}Generating review for PR #{pr_num}...{_RESET}\n")
-    comment_body = review_pr_as_comment(_key(args), base=args.base, model=args.model)
-    url = upsert_comment(repo, pr_num, comment_body, REVIEW_COMMENT_HEADER)
-    print(f"  {_GREEN}✓{_RESET} Review posted: {url}\n")
+    if args.inline:
+        from .github_client import create_pr_review
+        from .analyzer import _git
+        commit_sha = _git("rev-parse", "HEAD")
+        print(f"\n  {_DIM}Running inline review for PR #{pr_num}...{_RESET}\n")
+        review = review_pr_inline(_key(args), base=args.base, model=args.model)
+
+        _SEV_COLOR = {"must-fix": _RED, "suggestion": _YELLOW, "nit": _DIM}
+        print(f"  {_BOLD}Summary:{_RESET} {review.summary}\n")
+        if review.comments:
+            print(f"  {_BOLD}{len(review.comments)} inline comment(s):{_RESET}")
+            for c in review.comments:
+                color = _SEV_COLOR.get(c.severity, "")
+                print(f"  {color}[{c.severity}]{_RESET}  {_CYAN}{c.path}:{c.line}{_RESET}")
+                print(f"    {c.body}\n")
+        else:
+            print(f"  {_GREEN}✓{_RESET} No issues found.\n")
+
+        gh_comments = [
+            {"path": c.path, "line": c.line, "body": f"**{c.severity}**: {c.body}"}
+            for c in review.comments
+        ]
+        url = create_pr_review(repo, pr_num, commit_sha, review.summary, gh_comments)
+        print(f"  {_GREEN}✓{_RESET} Inline review posted: {url}\n")
+    else:
+        from .github_client import upsert_comment
+        from .templates import REVIEW_COMMENT_HEADER
+        print(f"\n  {_DIM}Generating review for PR #{pr_num}...{_RESET}\n")
+        comment_body = review_pr_as_comment(_key(args), base=args.base, model=args.model)
+        url = upsert_comment(repo, pr_num, comment_body, REVIEW_COMMENT_HEADER)
+        print(f"  {_GREEN}✓{_RESET} Review posted: {url}\n")
 
 
 def cmd_changelog(args: argparse.Namespace) -> None:
@@ -466,6 +505,8 @@ def main() -> None:
     p_rev = sub.add_parser("review", help="Get a quick code review of the current branch")
     p_rev.add_argument("--base", default=_default_base, help="Base branch to diff against")
     p_rev.add_argument("--model", default=_default_model, help="OpenAI model to use")
+    p_rev.add_argument("--inline", action="store_true",
+                       help="Show structured inline comments with file:line references")
     p_rev.set_defaults(func=cmd_review)
 
     # --- test ---
@@ -558,6 +599,8 @@ def main() -> None:
     p_com.add_argument("--model", default=_default_model, help="OpenAI model to use")
     p_com.add_argument("--repo", default=None, help="GitHub repo slug (e.g. owner/repo)")
     p_com.add_argument("--pr", type=int, default=None, help="PR number")
+    p_com.add_argument("--inline", action="store_true",
+                       help="Post as a proper GitHub review with per-line inline comments")
     p_com.set_defaults(func=cmd_comment)
 
     # --- changelog ---

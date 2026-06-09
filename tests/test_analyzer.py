@@ -12,6 +12,9 @@ from pr_pilot.analyzer import (
     generate_tests, GeneratedTests,
     scan_security, SecurityReport, SecurityIssue,
     get_diff, get_diff_stat, _find_pr_template, _parse_json_response,
+    review_pr_inline, InlineReview, ReviewComment,
+    _parse_diff_lines, _annotate_diff_for_review,
+    _detect_commit_scope,
 )
 from pr_pilot.templates import (
     REVIEW_COMMENT_HEADER, REVIEWER_COMMENT_HEADER, SECURITY_COMMENT_HEADER,
@@ -609,3 +612,146 @@ def test_security_report_to_comment_with_issues():
 def test_scan_security_no_diff(mock_diff):
     report = scan_security("fake-key")
     assert report.summary == "No diff to scan."
+
+
+# ── _parse_diff_lines ─────────────────────────────────────────────────────────
+
+_SAMPLE_DIFF = """\
+diff --git a/foo.py b/foo.py
+--- a/foo.py
++++ b/foo.py
+@@ -8,5 +8,6 @@
+ line 8
+ line 9
++line 10 added
+ line 11
+ line 12
+-line 13 deleted
++line 13 replaced
+"""
+
+def test_parse_diff_lines_tracks_added_and_context():
+    lm = _parse_diff_lines(_SAMPLE_DIFF)
+    assert "foo.py" in lm
+    lines = lm["foo.py"]
+    assert 8 in lines      # context
+    assert 9 in lines      # context
+    assert 10 in lines     # added
+    assert 11 in lines     # context
+    assert 12 in lines     # context
+    assert 13 in lines     # replaced (new version)
+
+
+def test_parse_diff_lines_hunk_offset():
+    diff = (
+        "diff --git a/bar.py b/bar.py\n"
+        "--- a/bar.py\n"
+        "+++ b/bar.py\n"
+        "@@ -100,3 +100,4 @@\n"
+        " line 100\n"
+        "+line 101 added\n"
+        " line 102\n"
+        " line 103\n"
+    )
+    lm = _parse_diff_lines(diff)
+    assert sorted(lm["bar.py"]) == [100, 101, 102, 103]
+
+
+def test_parse_diff_lines_multiple_files():
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " line 1\n+line 2\n"
+        "diff --git a/b.py b/b.py\n"
+        "--- a/b.py\n+++ b/b.py\n"
+        "@@ -5,2 +5,2 @@\n"
+        " line 5\n+line 6\n"
+    )
+    lm = _parse_diff_lines(diff)
+    assert "a.py" in lm
+    assert "b.py" in lm
+    assert 2 in lm["a.py"]
+    assert 6 in lm["b.py"]
+
+
+# ── review_pr_inline ──────────────────────────────────────────────────────────
+
+_INLINE_RESPONSE = json.dumps({
+    "summary": "This PR looks mostly good with one issue.",
+    "comments": [
+        {"path": "foo.py", "line": 10, "severity": "must-fix", "body": "Potential null dereference."},
+        {"path": "foo.py", "line": 999, "severity": "nit", "body": "Line not in diff — should be dropped."},
+    ]
+})
+
+
+@patch("pr_pilot.analyzer._annotate_diff_for_review")
+@patch("pr_pilot.analyzer.OpenAI")
+def test_review_pr_inline_returns_validated_comments(mock_openai, mock_annotate):
+    # line_map: foo.py has lines 8-13; line 999 is not in it
+    mock_annotate.return_value = ("annotated diff text", {"foo.py": {8, 9, 10, 11, 12, 13}})
+    mock_openai.return_value.chat.completions.create.return_value = _mock_openai_response(_INLINE_RESPONSE)
+
+    result = review_pr_inline("fake-key", base="main")
+
+    assert isinstance(result, InlineReview)
+    assert "mostly good" in result.summary
+    # line 10 is valid → kept; line 999 is not in diff → nearest (13) substituted
+    assert len(result.comments) == 2
+    must_fix = next(c for c in result.comments if c.severity == "must-fix")
+    assert must_fix.line == 10
+    assert must_fix.path == "foo.py"
+
+
+@patch("pr_pilot.analyzer._annotate_diff_for_review")
+@patch("pr_pilot.analyzer.OpenAI")
+def test_review_pr_inline_no_comments(mock_openai, mock_annotate):
+    mock_annotate.return_value = ("some diff", {"foo.py": {1, 2, 3}})
+    mock_openai.return_value.chat.completions.create.return_value = _mock_openai_response(
+        json.dumps({"summary": "Looks perfect.", "comments": []})
+    )
+    result = review_pr_inline("fake-key")
+    assert result.comments == []
+    assert "perfect" in result.summary
+
+
+@patch("pr_pilot.analyzer._annotate_diff_for_review")
+def test_review_pr_inline_empty_diff(mock_annotate):
+    mock_annotate.return_value = ("", {})
+    result = review_pr_inline("fake-key")
+    assert result.summary == "No changes to review."
+    assert result.comments == []
+
+
+def test_inline_review_fallback_comment():
+    review = InlineReview(
+        summary="One issue found.",
+        comments=[ReviewComment(path="foo.py", line=10, severity="must-fix", body="Fix this.")],
+    )
+    md = review.to_fallback_comment()
+    assert "must-fix" in md
+    assert "foo.py:10" in md
+    assert "Fix this." in md
+
+
+# ── _detect_commit_scope ──────────────────────────────────────────────────────
+
+def test_detect_scope_majority_dir():
+    with patch("pr_pilot.analyzer._git", return_value="auth/login.py\nauth/signup.py\nauth/models.py"):
+        assert _detect_commit_scope() == "auth"
+
+
+def test_detect_scope_mixed_dirs_no_scope():
+    with patch("pr_pilot.analyzer._git", return_value="auth/login.py\napi/routes.py\ndocs/readme.md"):
+        assert _detect_commit_scope() == ""
+
+
+def test_detect_scope_strips_src_prefix():
+    with patch("pr_pilot.analyzer._git", return_value="src/api/routes.py\nsrc/api/models.py"):
+        assert _detect_commit_scope() == "api"
+
+
+def test_detect_scope_single_file():
+    with patch("pr_pilot.analyzer._git", return_value="auth/login.py"):
+        assert _detect_commit_scope() == "auth"

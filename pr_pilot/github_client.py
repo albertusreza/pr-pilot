@@ -80,6 +80,25 @@ def post_comment(repo: str, pr_number: int, body: str) -> None:
     _api("POST", f"/repos/{repo}/issues/{pr_number}/comments", {"body": body})
 
 
+def create_pr_review(
+    repo: str,
+    pr_number: int,
+    commit_sha: str,
+    summary: str,
+    comments: list[dict],   # each: {path, line, body}
+    event: str = "COMMENT", # COMMENT | REQUEST_CHANGES | APPROVE
+) -> str:
+    """Create a GitHub pull request review with optional inline comments."""
+    payload: dict = {
+        "commit_id": commit_sha,
+        "body": summary,
+        "event": event,
+        "comments": comments,
+    }
+    data = _api("POST", f"/repos/{repo}/pulls/{pr_number}/reviews", payload)
+    return data.get("html_url", "")
+
+
 def upsert_comment(repo: str, pr_number: int, body: str, marker: str) -> str:
     """Post or update a comment that contains `marker`. Returns the comment URL."""
     comments = _api("GET", f"/repos/{repo}/issues/{pr_number}/comments?per_page=100")
