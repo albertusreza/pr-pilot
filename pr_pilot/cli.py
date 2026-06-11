@@ -62,6 +62,27 @@ def cmd_describe(args: argparse.Namespace) -> None:
         with open(path, "w") as f:
             f.write(desc.to_markdown())
         print(f"\n  {_GREEN}✓{_RESET} Written to {path}")
+
+    if args.push:
+        from .github_client import update_pr, add_labels, get_pr
+        repo   = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+        pr_num = args.pr  or int(os.environ.get("PR_NUMBER", "0"))
+        if not repo or not pr_num:
+            print(
+                f"\n  {_YELLOW}⚠{_RESET} --push requires --repo and --pr "
+                "(or GITHUB_REPOSITORY / PR_NUMBER env vars)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\n  {_DIM}Updating PR #{pr_num} on GitHub...{_RESET}")
+            pr = get_pr(repo, pr_num)
+            # Only overwrite title if it looks auto-generated (same as branch name or short)
+            new_title = desc.title if (not pr.title or len(pr.title) < 20) else None
+            update_pr(repo, pr_num, title=new_title, body=desc.to_markdown())
+            print(f"  {_GREEN}✓{_RESET} Description updated on GitHub")
+            if desc.labels:
+                add_labels(repo, pr_num, desc.labels)
+                print(f"  {_GREEN}✓{_RESET} Labels applied: {', '.join(desc.labels)}")
     print()
 
 
@@ -98,6 +119,15 @@ def cmd_comment(args: argparse.Namespace) -> None:
     if args.inline:
         from .github_client import create_pr_review
         from .analyzer import _git
+
+        # Determine review event
+        if args.approve:
+            event = "APPROVE"
+        elif args.request_changes:
+            event = "REQUEST_CHANGES"
+        else:
+            event = "COMMENT"
+
         commit_sha = _git("rev-parse", "HEAD")
         print(f"\n  {_DIM}Running inline review for PR #{pr_num}...{_RESET}\n")
         review = review_pr_inline(_key(args), base=args.base, model=args.model)
@@ -117,8 +147,9 @@ def cmd_comment(args: argparse.Namespace) -> None:
             {"path": c.path, "line": c.line, "body": f"**{c.severity}**: {c.body}"}
             for c in review.comments
         ]
-        url = create_pr_review(repo, pr_num, commit_sha, review.summary, gh_comments)
-        print(f"  {_GREEN}✓{_RESET} Inline review posted: {url}\n")
+        url = create_pr_review(repo, pr_num, commit_sha, review.summary, gh_comments, event=event)
+        event_label = {"APPROVE": "✅ Approved", "REQUEST_CHANGES": "🔴 Changes requested", "COMMENT": "✓ Review posted"}.get(event, "✓ Done")
+        print(f"  {_GREEN}{event_label}{_RESET}: {url}\n")
     else:
         from .github_client import upsert_comment
         from .templates import REVIEW_COMMENT_HEADER
@@ -499,6 +530,12 @@ def main() -> None:
     p_desc.add_argument("--markdown", metavar="FILE", help="Write description as markdown to FILE")
     p_desc.add_argument("--no-template", action="store_true",
                         help="Ignore .github/pull_request_template.md even if present")
+    p_desc.add_argument("--push", action="store_true",
+                        help="Update the PR description and labels on GitHub")
+    p_desc.add_argument("--repo", default=None, metavar="OWNER/REPO",
+                        help="GitHub repo slug (required with --push unless GITHUB_REPOSITORY is set)")
+    p_desc.add_argument("--pr", type=int, default=None,
+                        help="PR number (required with --push unless PR_NUMBER is set)")
     p_desc.set_defaults(func=cmd_describe)
 
     # --- review ---
@@ -601,6 +638,11 @@ def main() -> None:
     p_com.add_argument("--pr", type=int, default=None, help="PR number")
     p_com.add_argument("--inline", action="store_true",
                        help="Post as a proper GitHub review with per-line inline comments")
+    _com_verdict = p_com.add_mutually_exclusive_group()
+    _com_verdict.add_argument("--approve", action="store_true",
+                              help="Submit review as APPROVE (use with --inline)")
+    _com_verdict.add_argument("--request-changes", dest="request_changes", action="store_true",
+                              help="Submit review as REQUEST_CHANGES (use with --inline)")
     p_com.set_defaults(func=cmd_comment)
 
     # --- changelog ---

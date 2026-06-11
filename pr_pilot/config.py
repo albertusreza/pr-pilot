@@ -4,17 +4,19 @@ Reads ~/.pullwise.toml (or the path in PULLWISE_CONFIG env var).
 
 Example config:
     [pullwise]
-    api_key = "sk-..."
-    model   = "gpt-4o-mini"
-    base    = "main"
+    api_key       = "sk-..."
+    github_token  = "ghp_..."
+    model         = "gpt-4o-mini"
+    base          = "main"
 """
 import os
 from pathlib import Path
 
 _DEFAULTS = {
-    "api_key": "",
-    "model": "gpt-4o",
-    "base": "main",
+    "api_key":      "",
+    "github_token": "",
+    "model":        "gpt-4o",
+    "base":         "main",
 }
 
 _cfg: dict[str, str] | None = None
@@ -58,11 +60,11 @@ def _load() -> dict[str, str]:
 
 def get(key: str) -> str:
     """Return config value. Precedence: env vars > config file > built-in default."""
-    # Env var overrides config file
     env_map = {
-        "api_key": "OPENAI_API_KEY",
-        "model":   "PULLWISE_MODEL",
-        "base":    "PULLWISE_BASE",
+        "api_key":      "OPENAI_API_KEY",
+        "github_token": "GITHUB_TOKEN",
+        "model":        "PULLWISE_MODEL",
+        "base":         "PULLWISE_BASE",
     }
     env_val = os.environ.get(env_map.get(key, ""), "")
     if env_val:
@@ -72,6 +74,10 @@ def get(key: str) -> str:
 
 def api_key() -> str:
     return get("api_key")
+
+
+def github_token() -> str:
+    return get("github_token")
 
 
 def default_model() -> str:

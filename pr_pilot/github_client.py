@@ -17,7 +17,8 @@ class PRInfo:
 
 
 def _api(method: str, path: str, body: dict | None = None) -> dict:
-    token = os.environ.get("GITHUB_TOKEN", "")
+    from . import config as _config
+    token = _config.github_token()
     url = f"https://api.github.com{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
